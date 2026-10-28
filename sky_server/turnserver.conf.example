@@ -1,0 +1,14 @@
+# coturn: relay for calls when a direct connection is impossible (strict NAT, mobile data).
+# Install: apt install coturn. Use this as /etc/turnserver.conf and set the same secret
+# in config/sys.config (turn_urls, turn_secret).
+listening-port=3478
+tls-listening-port=5349
+fingerprint
+use-auth-secret
+static-auth-secret=CHANGE_ME_LONG_RANDOM
+realm=turn.example.com
+total-quota=100
+no-multicast-peers
+no-cli
+# cert=/etc/letsencrypt/live/turn.example.com/fullchain.pem
+# pkey=/etc/letsencrypt/live/turn.example.com/privkey.pem

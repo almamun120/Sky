@@ -1,0 +1,11 @@
+# TLS in front of the Erlang server. Caddy gets a free certificate automatically.
+# Replace the domain with yours; clients then use wss://chat.example.com/ws
+# (the app derives the push channel wss://chat.example.com/push and the
+# upload/download URLs from the same address).
+chat.example.com {
+    # /ws and /push are WebSockets, /upload and /media/* are plain HTTP; Caddy handles all of them.
+    reverse_proxy localhost:8080 {
+        # push connections are long-lived; do not cut them when the config reloads
+        stream_close_delay 5m
+    }
+}

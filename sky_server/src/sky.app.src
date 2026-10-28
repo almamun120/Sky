@@ -1,0 +1,11 @@
+{application, sky,
+ [{description, "Sky messenger server"},
+  {vsn, "0.2.0"},
+  {registered, []},
+  {mod, {sky_app, []}},
+  {applications, [kernel, stdlib, crypto, cowboy, jsx]},
+  {env, [{port, 8080},
+         %% dev_mode=true returns the OTP in the reply. Set false in production
+         %% and implement sky_sms:send/2.
+         {dev_mode, true}]}
+ ]}.
