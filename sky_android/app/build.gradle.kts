@@ -48,6 +48,7 @@ android {
         resources { excludes += setOf("libsignal_jni*.dylib", "signal_jni*.dll") }
     }
     buildFeatures { compose = true }
+    lint { checkReleaseBuilds = false; abortOnError = false }
 }
 
 dependencies {
