@@ -2,4 +2,6 @@
 <paths>
     <!-- Only temporary decrypted copies handed to other apps; attachments themselves are never shared. -->
     <cache-path name="view" path="plain/view/" />
+    <!-- A photo taken with the camera for sending; removed when the app starts again. -->
+    <cache-path name="camera" path="camera/" />
 </paths>

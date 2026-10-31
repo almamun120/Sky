@@ -38,7 +38,7 @@ fun StarredScreen(app: SkyApp, onBack: () -> Unit, onOpen: (String) -> Unit) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                 }
             },
-            colors = TopAppBarDefaults.topAppBarColors(containerColor = BarGreen, titleContentColor = Color.White)
+            colors = TopAppBarDefaults.topAppBarColors(containerColor = Sky.bar, titleContentColor = Color.White)
         )
     }) { pad ->
         if (list.isEmpty()) {
@@ -52,13 +52,13 @@ fun StarredScreen(app: SkyApp, onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Row(Modifier.fillMaxWidth().clickable { onOpen(m.chat) }.padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(who + "  ›  " + titleOf(m.chat), fontSize = 12.sp, color = BarGreen, maxLines = 1)
+                        Text(who + "  ›  " + titleOf(m.chat), fontSize = 12.sp, color = Sky.accentText, maxLines = 1)
                         Text(previewText(m.kind, m.body, m.fname), maxLines = 3, overflow = TextOverflow.Ellipsis)
                         Text(timeText(m.ts), fontSize = 11.sp, color = Color.Gray)
                     }
                     TextButton(onClick = { app.client.star(m, false) }) { Text("★", fontSize = 22.sp, color = Color(0xFFF5B301)) }
                 }
-                HorizontalDivider(color = Color(0x14000000))
+                HorizontalDivider(color = Sky.divider)
             }
         }
     }

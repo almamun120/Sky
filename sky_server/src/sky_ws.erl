@@ -7,31 +7,85 @@
 -define(MAX_GROUP, 50).
 -define(MAX_SDP_CT, 40000).  %% base64 of an encrypted SDP (video offers are large)
 -define(MAX_CT, 16384).        %% base64 ciphertext of one message
+%% Fields that carry raw bytes (base64 in JSON mode). In MessagePack mode they travel as "bin" on the wire.
+-define(BIN_KEYS, [<<"ct">>, <<"c">>, <<"sct">>, <<"blob">>, <<"identity">>, <<"pub">>, <<"sig">>]).
 
+%% The client names the wire format it wants in the Sec-WebSocket-Protocol header:
+%%   sky.msgpack  binary frames (MessagePack)     sky.json  text frames (JSON)
+%% The server answers with the first allowed format (config `wire_formats`, in order of preference) that the
+%% client offered. A client that offers nothing (an old one) gets JSON, if JSON is allowed.
 init(Req, _Opts) ->
-    {cowboy_websocket, Req,
-     #{phone => undefined, bucket => {30.0, erlang:monotonic_time(millisecond)}},
-     #{idle_timeout => 120000, max_frame_size => 524288}}.
+    case choose_wire(Req) of
+        {ok, Wire, Req1} ->
+            {cowboy_websocket, Req1,
+             #{phone => undefined, wire => Wire, bucket => {30.0, erlang:monotonic_time(millisecond)}},
+             #{idle_timeout => 120000, max_frame_size => 524288,
+               compress => application:get_env(sky, ws_compress, false)}};
+        error ->
+            {ok, cowboy_req:reply(400, #{<<"content-type">> => <<"text/plain">>},
+                                  <<"no usable wire format (sky.msgpack / sky.json)">>, Req), _Opts}
+    end.
+
+choose_wire(Req) ->
+    Allowed = application:get_env(sky, wire_formats, [msgpack, json]),
+    Names = [{<<"sky.msgpack">>, msgpack}, {<<"sky.json">>, json}],
+    Offered = case cowboy_req:parse_header(<<"sec-websocket-protocol">>, Req) of
+        undefined -> [];
+        L when is_list(L) -> L;
+        _ -> []
+    end,
+    case Offered of
+        [] ->
+            case lists:member(json, Allowed) of
+                true -> {ok, json, Req};
+                false -> error
+            end;
+        _ ->
+            Pick = [N || W <- Allowed, {N, W2} <- Names, W2 =:= W, lists:member(N, Offered)],
+            case Pick of
+                [N | _] ->
+                    {_, W} = lists:keyfind(N, 1, Names),
+                    {ok, W, cowboy_req:set_resp_header(<<"sec-websocket-protocol">>, N, Req)};
+                [] -> error
+            end
+    end.
 
 websocket_init(S) ->
     erlang:send_after(30000, self(), auth_timeout),   %% must log in within 30 s
     {[], S}.
 
-websocket_handle({text, Json}, S) ->
-    try jsx:decode(Json, [return_maps]) of
-        Msg when is_map(Msg) -> handle_limited(Msg, S);
-        _ -> reply_err(<<"bad_request">>, S)
-    catch _:_ -> reply_err(<<"bad_json">>, S)
-    end;
+websocket_handle({text, Json}, #{wire := json} = S) ->
+    out(try jsx:decode(Json, [return_maps]) of
+            Msg when is_map(Msg) -> handle_limited(Msg, S);
+            _ -> reply_err(<<"bad_request">>, S)
+        catch _:_ -> reply_err(<<"bad_json">>, S)
+        end);
+websocket_handle({binary, Bin}, #{wire := msgpack} = S) ->
+    out(case sky_msgpack:decode(Bin) of
+            {ok, Msg} when is_map(Msg) -> handle_limited(Msg, S);
+            {ok, _} -> reply_err(<<"bad_request">>, S);
+            error -> reply_err(<<"bad_msgpack">>, S)
+        end);
+websocket_handle({Kind, _}, S) when Kind =:= text; Kind =:= binary ->
+    {[{close, 1003, <<"wrong_frame_type">>}], S};      %% text on a MessagePack connection or the other way round
 websocket_handle(_Other, S) -> {[], S}.
 
-websocket_info({deliver, Msg}, S) -> {[frame(Msg)], S};
-websocket_info({presence_changed, P}, #{phone := Me} = S) when Me =/= undefined ->
+websocket_info(Info, S) -> out(info(Info, S)).
+
+%% Frames are built as {map, Map}; they become JSON text or MessagePack binary here, per connection.
+out({Frames, S}) -> {[enc_frame(F, maps:get(wire, S, json)) || F <- Frames], S}.
+
+enc_frame({map, M}, json) -> {text, jsx:encode(M)};
+enc_frame({map, M}, msgpack) -> {binary, sky_msgpack:encode(M, ?BIN_KEYS)};
+enc_frame(Other, _) -> Other.
+
+info({deliver, Msg}, S) -> {[frame(Msg)], S};
+info({presence_changed, P}, #{phone := Me} = S) when Me =/= undefined ->
     {[frame(presence_frame(Me, P))], S};
-websocket_info(kicked, S) -> {[{close, 1000, <<"logged_in_elsewhere">>}], S};
-websocket_info(auth_timeout, #{phone := undefined} = S) ->
+info(kicked, S) -> {[{close, 1000, <<"logged_in_elsewhere">>}], S};
+info(auth_timeout, #{phone := undefined} = S) ->
     {[{close, 1008, <<"auth_timeout">>}], S};
-websocket_info(_, S) -> {[], S}.
+info(_, S) -> {[], S}.
 
 %% ---- pre-login ----
 
@@ -43,7 +97,9 @@ handle(#{<<"type">> := <<"request_otp">>, <<"phone">> := Phone}, #{phone := unde
             case sky_otp:request(Phone) of
                 {ok, Code} ->
                     Reply = case application:get_env(sky, dev_mode, true) of
-                        true -> #{<<"type">> => <<"otp_sent">>, <<"dev_code">> => Code};
+                        true ->
+                            io:format("~n=== DEV OTP for ~s : ~s ===~n", [Phone, Code]),
+                            #{<<"type">> => <<"otp_sent">>, <<"dev_code">> => Code};
                         false -> ok = sky_sms:send(Phone, Code),
                                  #{<<"type">> => <<"otp_sent">>}
                     end,
@@ -57,12 +113,27 @@ handle(#{<<"type">> := <<"verify_otp">>, <<"phone">> := Phone, <<"code">> := Cod
   when is_binary(Phone), is_binary(Code), is_binary(Name), byte_size(Name) =< 64 ->
     case valid_phone(Phone) andalso sky_otp:verify(Phone, Code) of
         ok ->
-            ok = sky_db:put_user(Phone, Name),
-            Token = sky_db:new_session(Phone),
-            {Frames, S1} = do_login(Phone, S),
-            {[frame(#{<<"type">> => <<"token">>, <<"token">> => Token}) | Frames], S1};
+            case pin_required(Phone) of
+                true ->
+                    %% the SMS code was right, but this number has a two-step PIN: ask for it on this connection
+                    {[frame(#{<<"type">> => <<"pin_needed">>})],
+                     S#{pin_for => Phone, pin_name => Name, pin_until => erlang:monotonic_time(millisecond) + 300000}};
+                false -> complete_login(Phone, Name, S)
+            end;
         false -> reply_err(<<"bad_phone">>, S);
         {error, Why} -> reply_err(atom_to_binary(Why), S)
+    end;
+
+handle(#{<<"type">> := <<"verify_pin">>, <<"pin">> := Pin},
+       #{phone := undefined, pin_for := Phone, pin_name := Name, pin_until := Until} = S) when is_binary(Pin) ->
+    case erlang:monotonic_time(millisecond) =< Until of
+        false -> reply_err(<<"pin_expired">>, maps:without([pin_for, pin_name, pin_until], S));
+        true ->
+            case sky_db:check_pin(Phone, Pin) of
+                ok -> complete_login(Phone, Name, maps:without([pin_for, pin_name, pin_until], S));
+                {error, locked} -> reply_err(<<"pin_locked">>, S);
+                {error, wrong} -> reply_err(<<"bad_pin">>, S)
+            end
     end;
 
 handle(#{<<"type">> := <<"auth">>, <<"token">> := Token}, #{phone := undefined} = S)
@@ -267,6 +338,35 @@ handle(#{<<"type">> := <<"set_privacy">>, <<"presence">> := Share}, #{phone := M
     ok = sky_db:set_share(Me, Share),
     sky_router:changed(Me),
     {[frame(privacy_frame(Me))], S};
+
+%% ---- two-step verification PIN (6 digits) ----
+handle(#{<<"type">> := <<"set_pin">>, <<"pin">> := Pin} = Req, #{phone := Me} = S) when Me =/= undefined, is_binary(Pin) ->
+    case valid_pin(Pin) of
+        false -> reply_err(<<"bad_pin_format">>, S);
+        true ->
+            %% when a PIN exists it must be given (as "old") to change it
+            case sky_db:check_pin(Me, maps:get(<<"old">>, Req, <<>>)) of
+                ok -> ok = sky_db:set_pin(Me, Pin), {[frame(pin_state_frame(Me))], S};
+                {error, locked} -> reply_err(<<"pin_locked">>, S);
+                {error, wrong} -> reply_err(<<"bad_pin">>, S)
+            end
+    end;
+
+handle(#{<<"type">> := <<"remove_pin">>, <<"pin">> := Pin}, #{phone := Me} = S) when Me =/= undefined, is_binary(Pin) ->
+    case sky_db:check_pin(Me, Pin) of
+        ok -> ok = sky_db:del_pin(Me), {[frame(pin_state_frame(Me))], S};
+        {error, locked} -> reply_err(<<"pin_locked">>, S);
+        {error, wrong} -> reply_err(<<"bad_pin">>, S)
+    end;
+
+%% ---- contact discovery: which of these hashed phone numbers are registered? ----
+handle(#{<<"type">> := <<"find_contacts">>, <<"hashes">> := Hs}, #{phone := Me} = S)
+  when Me =/= undefined, is_list(Hs), length(Hs) =< 500 ->
+    Valid = [H || H <- Hs, is_binary(H), byte_size(H) =:= 16],
+    Found = [#{<<"phone">> => P, <<"name">> => N}
+             || {P, N} <- sky_db:find_by_hashes(Valid), P =/= Me, N =/= undefined,
+                not sky_db:is_blocked(P, Me)],
+    {[frame(#{<<"type">> => <<"contacts_found">>, <<"matches">> => Found})], S};
 
 %% ---- own name and encrypted profile ----
 %% The display name is public (it already travels with every message). About text and photo are
@@ -597,8 +697,34 @@ do_login(Phone, S) ->
                 _ -> []
             end
     end,
-    {[LoginOk, frame(privacy_frame(Phone)), frame(blocks_frame(Phone)) | KeyFrames ++ Pending ++ Calls],
+    {[LoginOk, frame(privacy_frame(Phone)), frame(blocks_frame(Phone)), frame(pin_state_frame(Phone)) | KeyFrames ++ Pending ++ Calls],
      S#{phone := Phone}}.
+
+%% Registering a number that has a PIN needs the PIN. As long as nobody has used the account for 7 days the PIN is dropped
+%% (somebody who lost the PIN can then register again), unless a phone is online with it right now.
+pin_required(Phone) ->
+    case sky_db:has_pin(Phone) of
+        false -> false;
+        true ->
+            {Last, _} = sky_db:get_presence(Phone),
+            Idle = is_integer(Last) andalso os:system_time(millisecond) - Last > 7 * 86400000
+                   andalso sky_router:lookup(Phone) =:= error,
+            case Idle of
+                true -> sky_db:del_pin(Phone), false;
+                false -> true
+            end
+    end.
+
+complete_login(Phone, Name, S) ->
+    ok = sky_db:put_user(Phone, Name),
+    Token = sky_db:new_session(Phone),
+    {Frames, S1} = do_login(Phone, S),
+    {[frame(#{<<"type">> => <<"token">>, <<"token">> => Token}) | Frames], S1}.
+
+valid_pin(<<A,B,C,D,E,F>>) -> lists:all(fun(X) -> X >= $0 andalso X =< $9 end, [A,B,C,D,E,F]);
+valid_pin(_) -> false.
+
+pin_state_frame(Phone) -> #{<<"type">> => <<"pin_state">>, <<"on">> => sky_db:has_pin(Phone)}.
 
 blocks_frame(Phone) ->
     #{<<"type">> => <<"blocks">>, <<"phones">> => sky_db:blocks_of(Phone)}.
@@ -824,8 +950,9 @@ needs_limit(#{<<"type">> := T}) ->
     lists:member(T, [<<"send">>, <<"send_group">>, <<"lookup">>, <<"create_group">>, <<"add_members">>, <<"remove_member">>,
                      <<"request_otp">>, <<"verify_otp">>, <<"call">>, <<"fetch_keys">>,
                      <<"presence">>, <<"watch">>, <<"set_privacy">>, <<"block">>, <<"report">>,
-                     <<"set_name">>, <<"set_profile">>, <<"get_profile">>,
-                     <<"set_admin">>, <<"group_settings">>, <<"invite_create">>, <<"join_invite">>]);
+                     <<"set_name">>, <<"set_profile">>, <<"get_profile">>, <<"find_contacts">>,
+                     <<"set_admin">>, <<"group_settings">>, <<"invite_create">>, <<"join_invite">>,
+                     <<"set_pin">>, <<"remove_pin">>, <<"verify_pin">>]);
 needs_limit(_) -> false.
 
 take_token(#{bucket := {Tok0, Last}} = S) ->
@@ -927,7 +1054,7 @@ push_frame(Phone, Frame) ->
         error -> ok
     end.
 
-frame(Map) -> {text, jsx:encode(Map)}.
+frame(Map) -> {map, Map}.
 
 reply_err(Code, S) ->
     {[frame(#{<<"type">> => <<"error">>, <<"code">> => Code})], S}.

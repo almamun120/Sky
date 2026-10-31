@@ -190,3 +190,62 @@ New frames (all need a login):
   `bad_invite`, `group_full`. New Mnesia table `invite` (created automatically); the code is removed when the group is deleted.
 - If the owner leaves, the first remaining admin becomes owner.
 - Tests: `tests/test_group_admin.py`. Not compiled or run here (no Erlang).
+
+## Step A: transport security (ws / wss)
+The server can listen in two ways, each switched on or off in `config/sys.config` (both may be on):
+
+| setting | meaning | default |
+|---|---|---|
+| `{port, 8080}` | plain `ws://` / `http://`; `undefined` = off | on |
+| `{tls_port, 8443}` + `tls_certfile` + `tls_keyfile` | `wss://` / `https://` served by Erlang itself | off |
+| `{listen_ip, {127,0,0,1}}` | address to bind (use this when Caddy runs on the same machine) | all addresses |
+
+At least one of `port` / `tls_port` must be on, otherwise the server refuses to start.
+
+**Recommended for real use: wss with your own domain, using Caddy** (step by step):
+1. Buy or use a domain and add an **A record** `chat.mydomain.com` → the public IP address of your server (wait until it resolves).
+2. On the server open ports **80 and 443** (Caddy needs 80 once to get the certificate). Port 8080 must **not** be reachable from outside.
+3. In `config/sys.config` set `{listen_ip, {127,0,0,1}}` and `{dev_mode, false}` (and configure the SMS gateway), then restart the Erlang server.
+4. Install Caddy (https://caddyserver.com/docs/install) and put `Caddyfile` from this folder on the server.
+5. Run `SKY_DOMAIN=chat.mydomain.com caddy run --config Caddyfile` (or `systemctl enable --now caddy` with the file in `/etc/caddy/Caddyfile`).
+   Caddy fetches the certificate by itself and proxies `/ws`, `/push`, `/upload` and `/media/*` to `127.0.0.1:8080`.
+6. In the app (login screen, field "Server address") enter `wss://chat.mydomain.com/ws`. A green "Encrypted connection (wss)" line appears. The app
+   derives `wss://…/push` and `https://…/upload`, `https://…/media/…` from the same address.
+7. Test: `curl -I https://chat.mydomain.com/media/x` answers (a 4xx is fine, it means TLS and proxy work), and `ws://chat.mydomain.com/ws` over plain HTTP is redirected to https.
+
+For development on your own network use `ws://192.168.x.x:8080/ws` (leave `port` on, `tls_port` off). The debug build of the app allows it and shows an orange
+"not encrypted" line; the **release build refuses `ws://`** (cleartext traffic is switched off in its manifest).
+
+## Step B: wire format of /ws (JSON or MessagePack)
+- The app names the format it wants in the WebSocket handshake header `Sec-WebSocket-Protocol`: `sky.msgpack` (binary frames) or `sky.json` (text frames).
+  The server answers with the first allowed format (see `wire_formats`) among those the client offered, and talks that format on that connection.
+- `{wire_formats, [msgpack, json]}` (default): both allowed, MessagePack preferred. `[json]` = JSON only (handy for debugging), `[msgpack]` = MessagePack only.
+  JSON and MessagePack clients can be connected at the same time and talk to each other.
+- A client that sends no `Sec-WebSocket-Protocol` (an old client) gets **JSON exactly as before**, if `json` is in `wire_formats`; otherwise the handshake is refused (400).
+  A text frame on a MessagePack connection (or the other way round) closes it with code 1003.
+- The frames have the same fields in both formats. In MessagePack the byte fields `ct`, `c` (inside `cts`), `sct`, `blob`, `identity`, `pub`, `sig` are sent as
+  MessagePack **bin** (raw bytes, no base64, a third smaller for ciphertext); in JSON they stay base64 strings. The server converts at the edge, so everything behind it is unchanged.
+  Supported MessagePack types: nil, bool, ints, float, str, bin, array, map with string keys (no ext types). Errors: `bad_msgpack`, `bad_request`.
+- `{ws_compress, true}` turns on WebSocket permessage-deflate (per connection, only for clients that ask; OkHttp asks automatically).
+  It helps JSON and the text parts of MessagePack, not already encrypted bytes. Default off.
+- `/push` stays JSON.
+- Tests: all existing `tests/test_*.py` run unchanged (they have no protocol header, so they use JSON). New: `tests/test_msgpack.py` (MessagePack, JSON and old-style
+  clients together; needs the default `wire_formats`) and `python3 mp.py` (self-test of the Python helper, no server needed).
+  With a JSON-only server run `SKY_WIRE=json python3 test_msgpack.py` (only the negotiation checks).
+- **Not compiled or run here** (no Erlang): `sky_msgpack.erl`, `sky_ws.erl`, `sky_app.erl`. Only `tests/mp.py` was run.
+
+## Step 20 (roadmap): contact discovery
+- `{"type":"find_contacts","hashes":["16 hex characters", …]}` (at most 500 per call) → `{"type":"contacts_found","matches":[{"phone":"+880…","name":"…"}]}`.
+  The hash is the first 8 bytes of SHA-256 of `"sky-contact-v1:" + phone` (phone in +E.164 form), as lower-case hex. Your own number and people who blocked you are left out.
+- New Mnesia table `phash` (hash → phone), filled when an account is created and, for existing accounts, at every start of the server.
+- **Honest limit:** phone numbers can be guessed, so these hashes protect the address book from being sent in plain text, but not against someone who
+  hashes many numbers (the server operator, or an attacker who calls `find_contacts` over and over). The token bucket slows this down; real abuse protection comes in the last step.
+- Tests: `tests/test_contacts.py`. Not compiled or run here (no Erlang).
+
+## Step 26 (roadmap): two-step verification PIN
+- `{"type":"set_pin","pin":"123456","old":"…"}` (6 digits; `old` is needed when a PIN exists) and `{"type":"remove_pin","pin":"…"}` → `{"type":"pin_state","on":true|false}`. The same frame arrives at every login.
+- A login with the SMS code (`verify_otp`) for a number that has a PIN is answered with `{"type":"pin_needed"}`; the client then sends `{"type":"verify_pin","pin":"…"}` on the **same connection** (valid for 5 minutes) and gets `token` + `login_ok`.
+  Errors: `bad_pin`, `bad_pin_format`, `pin_locked` (5 wrong tries, 15 minutes), `pin_expired`.
+- Stored as PBKDF2-HMAC-SHA256 (100 000 rounds, random salt) in the new table `pin`; wrong tries in the memory table `pinfail`. Needs Erlang/OTP 24.2 or newer (`crypto:pbkdf2_hmac`).
+- If the number was not used for 7 days (last seen) and no phone of it is online, the PIN is deleted at the next registration.
+- Tests: `tests/test_pin.py` (it locks its random number for 15 minutes, so run it with a fresh number each time, which it does itself). Not compiled or run here (no Erlang).

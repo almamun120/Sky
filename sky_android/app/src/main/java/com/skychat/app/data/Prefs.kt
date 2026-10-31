@@ -49,7 +49,7 @@ class Prefs(ctx: Context, private val vault: Vault = Vault()) {
 
     // 10.0.2.2 = host machine as seen from the Android emulator
     var serverUrl: String
-        get() = sp.getString("server", "ws://10.0.2.2:8080/ws")!!
+        get() = sp.getString("server", "wss://chat.example.com/ws")!!
         set(v) = sp.edit().putString("server", v).apply()
     var token: String?
         get() = get(tokenSlot, "token")
@@ -70,6 +70,38 @@ class Prefs(ctx: Context, private val vault: Vault = Vault()) {
     var profileDirty: Boolean
         get() = sp.getBoolean("profileDirty", false)
         set(v) = sp.edit().putBoolean("profileDirty", v).apply()
+    /** Two-step verification PIN is on for my number (as the server last told me). */
+    var pinOn: Boolean
+        get() = sp.getBoolean("pinOn", false)
+        set(v) = sp.edit().putBoolean("pinOn", v).apply()
+    /** Ask for the phone's screen lock (PIN, pattern, fingerprint) when the app is opened. */
+    var appLock: Boolean
+        get() = sp.getBoolean("appLock", false)
+        set(v) = sp.edit().putBoolean("appLock", v).apply()
+    /** Lock again after the app was in the background for this long (ms): 0 = at once. */
+    var lockTimeoutMs: Long
+        get() = sp.getLong("lockTimeoutMs", 0)
+        set(v) = sp.edit().putLong("lockTimeoutMs", v).apply()
+    /** No screenshots, no screen recording, no picture in the recent-apps list. */
+    var blockScreenshots: Boolean
+        get() = sp.getBoolean("blockScreenshots", false)
+        set(v) = sp.edit().putBoolean("blockScreenshots", v).apply()
+    /** Build a link preview for links I send (my phone loads the page; receivers never do). */
+    var linkPreviews: Boolean
+        get() = sp.getBoolean("linkPreviews", true)
+        set(v) = sp.edit().putBoolean("linkPreviews", v).apply()
+    /** When the address book was last sent for matching (ms). */
+    var lastContactSync: Long
+        get() = sp.getLong("lastContactSync", 0)
+        set(v) = sp.edit().putLong("lastContactSync", v).apply()
+    /** Debug: ask for the JSON text format instead of MessagePack. */
+    var preferJson: Boolean
+        get() = sp.getBoolean("preferJson", false)
+        set(v) = sp.edit().putBoolean("preferJson", v).apply()
+    /** 0 follow the phone, 1 light, 2 dark. */
+    var themeMode: Int
+        get() = sp.getInt("themeMode", 0)
+        set(v) = sp.edit().putInt("themeMode", v).apply()
     /** My display name as last set on this phone (the server keeps the truth). */
     var name: String?
         get() = sp.getString("myname", null)

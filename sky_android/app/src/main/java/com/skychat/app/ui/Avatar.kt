@@ -42,3 +42,17 @@ fun Avatar(app: SkyApp, path: String, size: Dp, version: Int = 0) {
         else Icon(Icons.Filled.Person, null, tint = Color.White, modifier = Modifier.size(size * 0.6f))
     }
 }
+
+/** A photo shown whole (status updates). Decrypted in memory only. */
+@Composable
+fun PhotoImage(app: SkyApp, path: String, modifier: Modifier = Modifier.fillMaxSize()) {
+    val bmp by produceState<ImageBitmap?>(null, path) {
+        value = withContext(Dispatchers.IO) {
+            val f = File(path)
+            if (!f.exists()) null
+            else app.media.readBytes(f)?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+        }
+    }
+    val b = bmp
+    if (b != null) Image(b, null, contentScale = ContentScale.Fit, modifier = modifier)
+}

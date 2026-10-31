@@ -67,6 +67,13 @@ class VoiceRecorder(private val ctx: Context) {
 /** One voice note plays at a time. Files are decrypted to a temporary copy that is deleted afterwards. */
 object AudioPlayer {
     val playing = MutableStateFlow<String?>(null)
+    /** 1, 1.5 or 2 times normal speed (kept for the next voice notes too). */
+    val speed = MutableStateFlow(1f)
+
+    fun cycleSpeed() {
+        speed.value = when (speed.value) { 1f -> 1.5f; 1.5f -> 2f; else -> 1f }
+        mp?.let { try { it.playbackParams = it.playbackParams.setSpeed(speed.value) } catch (_: Exception) { } }
+    }
     private var mp: MediaPlayer? = null
     private var tmp: File? = null
     private var gen = 0
@@ -89,6 +96,7 @@ object AudioPlayer {
                     p.prepare()
                     p.setOnCompletionListener { stop() }
                     p.start()
+                    if (speed.value != 1f) p.playbackParams = p.playbackParams.setSpeed(speed.value)   // after start(): setting it earlier would start playback
                     mp = p; tmp = f
                 } catch (e: Exception) {
                     p.release(); media.shred(f); playing.value = null

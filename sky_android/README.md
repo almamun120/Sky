@@ -238,3 +238,145 @@ File: `.github/workflows/android.yml` (at the top of the repository, next to `sk
   4. **Keep a safe copy of `sky.jks` and its passwords.** If you lose it you can never update the app for the people who installed it.
 - The Gradle wrapper files (`gradlew`) are not in this project; the workflow installs Gradle 8.9 itself.
 - Not run (no GitHub here): if a run fails, send the log of the failed step.
+
+## Step 20: closer to WhatsApp (part 1), dev server address
+- **Dev:** ⋮ → "Server address (dev)" changes the server address at any time (also while logged in) and reconnects at once.
+  The login screen still has the address field. Remove both when the app goes public. `sky_ws.erl` in `sky_server/src` is the file you sent
+  (it prints the OTP on the server console); put the SMS gateway there later.
+- **Chat list:** search bar at the top, filter chips (All / Unread / Groups), bottom bar with **Chats** (badge = chats with unread messages)
+  and **Calls**. The Calls tab lists all voice and video calls (missed ones in red); tap a row to open that chat.
+- **Fixed:** since step 19 "Join group by link" opened together with the "Log out?" dialog (both used number 3).
+- Still different from the real WhatsApp: no Updates (Status) and Communities tabs, no dark theme, no emoji/GIF/sticker keyboard, no attach
+  sheet with Gallery/Camera/Location/Document/Poll, no camera in the app, no QR code, no Settings screen with sections, no call-back button in
+  the Calls tab. These come in the next steps.
+- Not compiled or run here.
+
+## Step 21: dark theme, Settings, attachment sheet (looks, part 2)
+- **Dark theme** in the colours of the real WhatsApp (dark bars, `#0B141A` chat background, `#005C4B` own bubbles). Settings → Appearance:
+  System default / Light / Dark (applies at once). Colours live in `ui/Theme.kt` (`Sky.xxx`); the call screen was already dark.
+- **Settings screen** (⋮ → Settings): profile card (opens Profile), Privacy, Blocked contacts (with Unblock), Starred messages, Appearance,
+  Notifications (Android's own settings for the app), Storage (size of media on this phone), Server address (dev), Invite a friend, About (version), Log out.
+- **Attachment sheet:** the 📎 button opens a bottom sheet with **Gallery**, **Camera** and **Document**. The camera photo is saved in a private cache
+  folder, sent encrypted, and the plain copy is deleted the next time the app starts. Android asks for camera permission the first time.
+- Not done yet (listed as coming): Location, Contact, Poll, Updates (Status) tab, QR code, emoji/GIF/sticker keyboard.
+- Not compiled or run here.
+
+## Step 22: Updates tab (status, 24 hours)
+- New bottom tab **Updates** (between Chats and Calls). **My status**: ✏ writes a text update on a coloured background, 📷 posts a photo.
+  Below: **Recent updates** of the people you chat with, people with unseen updates first (green ring).
+- Viewer: tap right / left for next / previous, moves on by itself after 5 seconds. For your own update it shows how many people looked
+  (👁) and a Delete button; a deleted update is removed from the other phones too.
+- **Privacy:** the server is not involved. An update is sent as an end-to-end encrypted control message to everyone you have a chat with and
+  have not blocked (at the moment you post); a photo is encrypted with its own key, which travels in that message. People you start chatting
+  with later do not get older updates. A viewer's phone tells the owner "seen" once.
+- Updates disappear after 24 hours (checked at every login; the Updates tab only shows the last 24 hours). Photos are stored encrypted on the phone.
+- Local database version 11 (real migration). Version 0.14.0. **No server change** in this step.
+- Limits: no "mute updates" or "my contacts except…" lists; no reply to an update; text updates have no font choice; photo updates have no editor;
+  the phone must be online to post a photo.
+- Not compiled or run here.
+
+## Step A/B in the app: wss and MessagePack
+- **Server address** (login screen, Settings → Server address): `wss://your-domain/ws` is the default. A line under the field says "Encrypted connection (wss)" (green),
+  "ws:// is not encrypted" (orange, test only) or why the address cannot be used (red); Send code and Save stay disabled until the address is valid.
+- **ws:// only in the debug build.** `android:usesCleartextTraffic` is `true` in debug and `false` in release (manifest placeholder `cleartext` in `app/build.gradle.kts`),
+  and the app itself also refuses `ws://` in a release build.
+- **MessagePack:** on connect the app sends `Sec-WebSocket-Protocol: sky.msgpack, sky.json`. If the server answers `sky.msgpack` it uses binary frames (`net/MsgPack.kt`);
+  if it answers `sky.json` or nothing (old server) it uses JSON. Debug switch: Settings → Server address → "JSON text format". The rest of the app is unchanged (still JSONObject).
+- Compression (permessage-deflate) is requested by OkHttp automatically; the server decides with `ws_compress`.
+- The push channel (`/push`) is still JSON.
+- Not compiled or run here (no Android SDK).
+
+## Step 20 (roadmap): friends from contacts, QR code
+- **New chat** (green + button): the list of **friends from your contacts who use Sky** (with the names from your address book), a phone number field, "Find friends" and "QR code".
+  "Find friends" asks for the contacts permission the first time. The app reads the address book, turns every number into +E.164 form (country from the SIM, else the phone's region, else BD),
+  and sends only **short hashes** to the server, which answers with the registered ones. Names stay on the phone. A sync also runs by itself at login, at most every 12 hours.
+- An address-book name beats the name the person chose for themselves (they stay marked `local` and are not overwritten by messages).
+- **QR code** (New chat → QR code, or Settings → QR code): tab **My code** shows `skychat://user/+880…` as a QR code on a white card (so scanners read it in dark mode too);
+  tab **Scan code** opens a scanner (library `zxing-android-embedded`; it asks for the camera itself) and opens the chat with that person. Another camera app that opens
+  `skychat://user/+880…` also lands in that chat.
+- Local database version 12 (real migration). Version 0.16.0. The server changed: update it first.
+- Limits: people who are removed from your address book stay in the list until you log out; the names of contacts that are not on Sky are never stored.
+- Not compiled or run here (no Android SDK, no Erlang).
+
+## Step 21 (roadmap): photos, videos, preview, viewer, gallery
+- **Preview before sending:** Attach (📎) → **Gallery** now picks up to **10 photos and videos at once**; **Camera** also opens the preview. On the preview screen:
+  ⟳ **Rotate** (90° steps), ▣ **Crop** (centre crop to Original / 1:1 / 4:3 / 3:4 / 16:9; free-hand cropping is not there), a **caption for every picture**,
+  a strip of thumbnails to switch between pictures or ✕ remove one, then **Send (N)**. Each picture becomes its own message, in order, with its caption under it.
+- **Videos:** sent as they are (no re-encoding, so the 25 MB limit applies; bigger files show "too large"). In the chat a video shows its first frame with ▶ and the size;
+  the receiver downloads it by tapping (videos are not downloaded by themselves, photos still are), and tapping the picture opens the viewer, whose ▶ plays it in your video app.
+  The first-frame picture is kept next to the video (also encrypted on the phone) and removed with it.
+- **Full-screen viewer:** tap any photo or video in the chat to open it; swipe left/right through all photos and videos of that chat; **double-tap** a photo to zoom, then pinch and drag
+  (double-tap again to reset); the caption is shown at the bottom.
+- **Media and documents** (⋮ in a chat): grid of all photos and videos (tap → viewer) and a list of documents (tap → open or download).
+- No server change in this step; the database stays at version 12. Version 0.17.0.
+- Limits: no video trimming or compression, no drawing/text on pictures, no "view once" (roadmap step 23), no links tab (comes with link previews in step 22).
+- Not compiled or run here (no Android SDK).
+
+## Step 22 (roadmap): location, contact card, GIF, sticker, link preview, voice speed
+- **Attach sheet** now has Gallery, Camera, Document, **Location**, **Contact**, **GIF**, **Sticker**.
+- **Location:** asks for the location permission, finds where you are (GPS or network), shows the coordinates and asks "Send your location?". The receiver sees a card with the
+  coordinates; tapping it opens their maps app (`geo:`). No map picture is loaded, so no map company learns where you are. Live location is not included.
+- **Contact card:** pick a person from your contacts (no contacts permission needed for this); the receiver sees name and number with **Message** (if the number can be turned into +E.164) and **Save** (opens the add-contact screen).
+- **GIF:** pick a `.gif` file from the phone; it is sent untouched and plays in the chat (Android 9 and newer; older phones show the first frame). There is **no online GIF search**
+  (it would send what you type to a third-party company and needs a key).
+- **Sticker:** pick any picture; it is scaled to at most 512 px and sent as PNG (transparent parts stay transparent). There is no sticker pack store; make your own pictures.
+- **Link preview:** when you send a message with a link, **your phone** loads the page (3-4 s limit, first 200 KB) and adds title and description to the message. The receivers never contact the site.
+  Switch: Privacy → Link previews. The chat's ⋮ → Media and documents has a new **Links** tab.
+- **Voice messages:** while one plays, a chip shows the speed; tap to switch 1× → 1.5× → 2×.
+- Local database version 13 (real migration). Version 0.18.0. **No server change** (the new message kinds travel inside the encrypted message).
+- Limits: a link preview has no picture; "Message" on a contact card needs a number the phone can turn into +E.164; polls (in the real WhatsApp sheet) are not built.
+- Not compiled or run here (no Android SDK).
+
+## Step 23 (roadmap): view once, disappearing messages
+- **View once** (one-to-one chats only): on the photo/video preview screen the button **🔥 View once** marks the picture. The receiver sees "🔥 Photo · tap to view once";
+  it opens in a window that cannot be screenshotted or screen-recorded (`FLAG_SECURE`, which also hides it in the recent-apps list); when the window is closed the picture is
+  **deleted from the phone** and the sender's bubble changes to "Opened". The sender keeps no copy after the upload and cannot forward it; the receiver cannot forward, star or
+  find it in the media gallery. A view-once video plays inside the same secure window (a temporary plain copy exists only while it plays and is wiped afterwards).
+  If the app is killed while a picture is open, it can be opened once more.
+- **Disappearing messages:** chat ⋮ → **Disappearing messages**: Off / 24 hours / 7 days / 90 days. It applies to **new** messages, on both phones (the length travels with each message,
+  and the change is announced in the chat: "X turned on disappearing messages: 24 hours"). In a group only admins can change it. A message disappears (with its picture, video or voice file)
+  when its time is over, counted from the time it was sent; the app checks every 30 seconds while it runs and at start-up. Starred messages are kept. Messages with a timer show ⏱.
+- Local database version 14 (real migration). Version 0.19.0. **No server change.**
+- Limits (be honest with your users): a receiver can still photograph the screen with another camera; a message that was not delivered yet can stay on the server until it is fetched; encrypted
+  files already uploaded stay on the media server until its own clean-up (step 30); a phone that is switched off keeps expired messages until the app starts again.
+- Not compiled or run here (no Android SDK).
+
+## Step 24 (roadmap): group calls, Bluetooth and sound route
+- **Sound route** (call screen, the speaker button): choose **Phone, Speaker, Bluetooth headset or wired headset**. At the start of a call a connected headset is chosen by itself, otherwise the
+  speaker for video and the earpiece for voice. Android 12 and newer asks for the "Nearby devices" (Bluetooth) permission the first time, so that a Bluetooth headset can be listed.
+- **Group calls** (📞 and 🎥 in the title bar of a group chat): everybody in the group gets an invitation (ringtone, or a notification if the app is in the background) and can **Join** or **Decline**;
+  people can join later while the call runs. The call screen shows a grid with everybody (video if it is a video call), mute, sound route, camera on/off, switch camera, hang up.
+  A line "Group voice call · 12:34" is added to the group chat when it ends (and appears in the Calls tab).
+- **How it works:** a mesh: every person is connected directly to every other person (peer-to-peer WebRTC), **at most 4 people in one call** (the 5th person to join cannot connect). There is no media
+  server. The signalling (who is in, the connection offers) travels as normal end-to-end encrypted messages between two people (`gc` control messages), so the **server did not change**.
+  The ICE candidates are sent together with the offer (no trickle) to keep it to two messages per pair. Of two people the one with the smaller phone number makes the offer.
+  Group video is sent small (480x360) because it is sent separately to up to three people.
+- A group call and a one-to-one call exclude each other (the second one gets "busy").
+- Limits: no more than 4 people; if the phone is switched off or the app is stopped by the system the invitation arrives only when it is online again (messages older than 2 minutes are ignored);
+  on bad networks you need a TURN server (`turn_urls` in the server config) for the same reason as one-to-one calls; battery and data use grow with every person; no screen sharing, no adding people
+  who are not in the group, no ringing of a person who left the group.
+- Not compiled or run here (no Android SDK).
+
+## Step 26 (roadmap): app lock, two-step verification, screenshot block
+- **App lock** (Settings → App lock): when the app is opened (or comes back after "immediately / 1 minute / 30 minutes") a lock screen covers it until the person unlocks with the phone's own
+  screen lock (PIN, pattern, password or fingerprint; the phone must have one). Calls can still be answered. If the phone's lock is removed later, the app lock switches itself off.
+- **Block screenshots** (Settings → Privacy): no screenshots or screen recording of Sky, and Sky's picture in the recent-apps list is blank. It is on automatically while the app lock is on.
+- **Two-step verification** (Settings → Two-step verification): a 6-digit PIN. Whoever registers the number on a phone later needs the SMS code **and** the PIN (the app asks for it after the code).
+  5 wrong PINs lock the number for 15 minutes. The server stores only a salted hash. If the PIN is forgotten, it falls away after the number was not used for 7 days (and no phone of the account is online).
+  Changing or turning off the PIN needs the current PIN. Phones that are already logged in stay logged in.
+- Server changed: `set_pin`, `remove_pin`, `verify_pin`, `pin_needed`, `pin_state` (see the server README). New tables `pin` (disk) and `pinfail` (memory).
+- Local database unchanged (version 14). Version 0.21.0.
+- Limits: the PIN is not asked again while you use the app (WhatsApp sometimes asks); no recovery e-mail; the lock uses the phone's screen lock, not a separate Sky PIN; notification texts stay visible while locked.
+- Not compiled or run here.
+
+## Step 27 (roadmap): encrypted chat backup and restore
+- **Settings → Chat backup → Back up:** choose a password (at least 8 characters, twice), then choose where to save the file (the system file chooser: phone storage, SD card, Google Drive...).
+  The file `sky-backup-YYYYMMDD.skybak` holds the chats (messages, contacts, groups, receipts, reactions, mute/pin/archive settings) and every **photo, video, voice note and file**, decrypted from the phone's own vault
+  and locked again with your password: AES-256-GCM in 1 MB pieces, key from PBKDF2-HMAC-SHA256 (250 000 rounds, random salt). A cut-off or changed file is detected.
+- **Restore** (same screen): choose the file, type the password. Messages with the same id are replaced by the backup's, everything else on the phone stays. Files are stored again in the phone's vault. Messages that were still unsent when the
+  backup was made come back as "failed" (they are not sent by themselves).
+- **Not in the backup:** the Signal keys and sessions (so the backup cannot be used to read your future messages if it is stolen; after a restore on a new phone, contacts see a **new safety number**), status updates,
+  profile and group pictures (fetched again), the block list (the server has it), settings of this phone.
+- **Forgot the password?** Nobody can open the file, not even the developer.
+- The backup must be restored with the same app version (same database version); the app says so otherwise. No automatic daily backup (that would need Google's APIs); make one now and then and keep it on Drive or a computer.
+- No server change. Database unchanged (14). Version 0.22.0. Not compiled or run here; the password-to-key loop was checked against Python's `hashlib.pbkdf2_hmac`.

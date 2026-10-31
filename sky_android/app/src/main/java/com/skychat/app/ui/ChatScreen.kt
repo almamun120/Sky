@@ -61,7 +61,7 @@ import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
+fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -> Unit) {
     val ctx = LocalContext.current
     val dao = app.db.dao()
     val msgs by dao.messages(chat).collectAsState(initial = emptyList())
@@ -76,6 +76,11 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
     val peer by dao.peerProfileFlow(chat).collectAsState(initial = null)
     LaunchedEffect(chat) { if (!isGroup(chat)) app.client.refreshProfile(chat) }
     var topMenu by remember { mutableStateOf(false) }
+    var pendingGroupCall by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val askGroupCall = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
+        if (res[Manifest.permission.RECORD_AUDIO] == true) pendingGroupCall?.invoke()
+        else Toast.makeText(ctx, "Microphone permission is needed for calls", Toast.LENGTH_SHORT).show()
+    }
     var dlg by remember { mutableIntStateOf(0) }     // 1 mute, 2 block / unblock, 3 report
     val cstate by dao.chatStateFlow(chat).collectAsState(initial = null)
     val blockedList by dao.blockedPhones().collectAsState(initial = emptyList())
@@ -119,11 +124,65 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
         else -> null
     }
 
-    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) app.client.sendMedia(chat, uri, "image")
+    // GIF, sticker, contact card, location
+    val pickGif = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) app.client.sendGif(chat, uri) }
+    val pickSticker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) app.client.sendSticker(chat, uri) }
+    val pickContact = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        val u = r.data?.data
+        if (r.resultCode == android.app.Activity.RESULT_OK && u != null) {
+            ctx.contentResolver.query(u, arrayOf(android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER,
+                android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) app.client.sendContactCard(chat, c.getString(1) ?: "", c.getString(0) ?: "")
+            }
+        }
+    }
+    var locationFound by remember { mutableStateOf<android.location.Location?>(null) }
+    fun findLocation() {
+        try {
+            val lm = ctx.getSystemService(android.location.LocationManager::class.java)
+            val provider = listOf(android.location.LocationManager.GPS_PROVIDER, android.location.LocationManager.NETWORK_PROVIDER)
+                .firstOrNull { lm.isProviderEnabled(it) }
+            if (provider == null) { Toast.makeText(ctx, "Turn on location on your phone", Toast.LENGTH_SHORT).show(); return }
+            Toast.makeText(ctx, "Finding your location…", Toast.LENGTH_SHORT).show()
+            @Suppress("MissingPermission")
+            androidx.core.location.LocationManagerCompat.getCurrentLocation(lm, provider, null, androidx.core.content.ContextCompat.getMainExecutor(ctx)) { loc ->
+                @Suppress("MissingPermission")
+                val l = loc ?: try { lm.getLastKnownLocation(provider) } catch (_: SecurityException) { null }
+                if (l != null) locationFound = l else Toast.makeText(ctx, "Could not find your location", Toast.LENGTH_SHORT).show()
+            }
+        } catch (_: SecurityException) { }
+    }
+    val locPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) findLocation() else Toast.makeText(ctx, "Location permission is needed", Toast.LENGTH_SHORT).show()
+    }
+    // Photos and videos go through a preview screen (rotate, crop, caption) before they are sent.
+    var preview by remember { mutableStateOf<List<android.net.Uri>?>(null) }
+    var viewerId by remember { mutableStateOf<String?>(null) }
+    val gallery by dao.mediaOf(chat).collectAsState(initial = emptyList())
+    var onceMsg by remember { mutableStateOf<Msg?>(null) }
+    var disDlg by remember { mutableStateOf(false) }
+    SideEffect { ViewerBus.open = { viewerId = it }; ViewerBus.openOnce = { onceMsg = it } }
+    val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { uris ->
+        if (uris.isNotEmpty()) preview = uris
     }
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) app.client.sendMedia(chat, uri, "file")
+    }
+    // Camera: the photo goes into a private cache folder, is sent encrypted, and the plain copy is deleted at the next start.
+    var cameraUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    val takePhoto = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val u = cameraUri
+        if (ok && u != null) preview = listOf(u)
+    }
+    fun launchCamera() {
+        val dir = java.io.File(ctx.cacheDir, "camera").apply { mkdirs() }
+        val f = java.io.File(dir, "photo_${System.currentTimeMillis()}.jpg")
+        val u = androidx.core.content.FileProvider.getUriForFile(ctx, "com.skychat.app.files", f)
+        cameraUri = u
+        takePhoto.launch(u)
+    }
+    val camPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) launchCamera() else Toast.makeText(ctx, "Camera permission is needed", Toast.LENGTH_SHORT).show()
     }
     fun startRec() {
         if (recorder.start(app.client.tmpDir)) { recording = true; elapsed = 0 }
@@ -136,6 +195,14 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
     val askCall = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
         if (res[Manifest.permission.RECORD_AUDIO] == true)
             app.calls.start(chat, wantVideo && res[Manifest.permission.CAMERA] == true)
+    }
+    fun callGroup(video: Boolean) {
+        val g = group ?: return
+        val need = if (video) arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
+                   else arrayOf(Manifest.permission.RECORD_AUDIO)
+        val go = { app.client.groupCalls?.start(g.gid, g.name, g.members.split(",").filter { it.isNotEmpty() }, video); Unit }
+        pendingGroupCall = go
+        if (need.all { ctx.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) go() else askGroupCall.launch(need)
     }
     fun callPeer(video: Boolean) {
         wantVideo = video
@@ -186,6 +253,84 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
     if (showGroup && group != null) {
         GroupInfoDialog(app, group, names) { showGroup = false }
     }
+    preview?.let { uris ->
+        MediaPreview(app, uris, title, allowOnce = !isGroup(chat), onClose = { preview = null }) { items -> preview = null; app.client.sendMediaBatch(chat, items) }
+    }
+    onceMsg?.let { m -> OnceViewer(app, m) { onceMsg = null } }
+    if (disDlg) {
+        val cur = cstate?.disappear ?: 0L
+        AlertDialog(
+            onDismissRequest = { disDlg = false },
+            title = { Text("Disappearing messages") },
+            text = {
+                Column {
+                    Text("New messages in this chat are deleted after the chosen time, on both phones. Messages you star are kept.",
+                        fontSize = 13.sp, color = Color.Gray, modifier = Modifier.padding(bottom = 8.dp))
+                    listOf(0L to "Off", 86_400L to "24 hours", 604_800L to "7 days", 7_776_000L to "90 days").forEach { (sec, label) ->
+                        Row(Modifier.fillMaxWidth().clickable { disDlg = false; app.client.setDisappear(chat, sec) },
+                            verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = cur == sec, onClick = { disDlg = false; app.client.setDisappear(chat, sec) })
+                            Text(label)
+                        }
+                    }
+                }
+            },
+            confirmButton = {}, dismissButton = { TextButton(onClick = { disDlg = false }) { Text("Cancel") } }
+        )
+    }
+    viewerId?.let { id -> MediaViewer(app, gallery.filter { hasLocalFile(it) }, id) { viewerId = null } }
+
+    if (menu) ModalBottomSheet(onDismissRequest = { menu = false }, containerColor = Sky.surface) {
+        @Composable fun Tile(icon: String, label: String, color: Color, onClick: () -> Unit) {
+            Column(Modifier.clickable { menu = false; onClick() }.padding(8.dp).width(84.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(Modifier.size(56.dp).clip(CircleShape).background(color), contentAlignment = Alignment.Center) {
+                    Text(icon, fontSize = 24.sp)
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(label, fontSize = 13.sp)
+            }
+        }
+        Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 32.dp, top = 8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                Tile("🖼", "Gallery", Color(0xFF7E57C2)) {
+                    pickMedia.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                }
+                Tile("📷", "Camera", Color(0xFFE91E63)) {
+                    if (ctx.checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                        launchCamera() else camPermission.launch(android.Manifest.permission.CAMERA)
+                }
+                Tile("📄", "Document", Color(0xFF3F51B5)) { pickFile.launch("*/*") }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                Tile("📍", "Location", Color(0xFF2E7D32)) {
+                    if (ctx.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                        findLocation() else locPermission.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                }
+                Tile("👤", "Contact", Color(0xFF0288D1)) {
+                    pickContact.launch(android.content.Intent(android.content.Intent.ACTION_PICK,
+                        android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI))
+                }
+                Tile("🎞", "GIF", Color(0xFFF57C00)) { pickGif.launch("image/gif") }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                Tile("🙂", "Sticker", Color(0xFF8E24AA)) { pickSticker.launch("image/*") }
+                Spacer(Modifier.width(84.dp)); Spacer(Modifier.width(84.dp))
+            }
+        }
+    }
+
+    locationFound?.let { loc ->
+        AlertDialog(
+            onDismissRequest = { locationFound = null },
+            title = { Text("Send your location?") },
+            text = { Text("%.5f, %.5f\n\nThe person (or group) will see where you are right now.".format(java.util.Locale.US, loc.latitude, loc.longitude)) },
+            confirmButton = { TextButton(onClick = { app.client.sendLocation(chat, loc.latitude, loc.longitude); locationFound = null }) { Text("Send") } },
+            dismissButton = { TextButton(onClick = { locationFound = null }) { Text("Cancel") } }
+        )
+    }
+
     infoMsg?.let { m ->
         val receipts by dao.receiptsOf(m.id).collectAsState(initial = emptyList())
         val st = receipts.associate { it.phone to it.status }
@@ -270,7 +415,7 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
                         cm?.setPrimaryClip(ClipData.newPlainText("Sky message", m.body))
                         Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
                     }
-                    if (!gone) ActionItem("Forward") { actionMsg = null; forwardMsg = m }
+                    if (!gone && m.once == 0) ActionItem("Forward") { actionMsg = null; forwardMsg = m }
                     if (!gone && m.fromMe && m.kind == "text" && fresh && canWrite) ActionItem("Edit") {
                         actionMsg = null; editing = m; replyTo = null; text = m.body
                     }
@@ -356,6 +501,10 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
                     if (isGroup(chat) && group != null) {
                         IconButton(onClick = { showGroup = true }) { Text("ⓘ", fontSize = 22.sp, color = Color.White) }
                     }
+                    if (isGroup(chat) && group != null && inGroup) {
+                        IconButton(onClick = { callGroup(false) }) { Text("📞", fontSize = 20.sp) }
+                        IconButton(onClick = { callGroup(true) }) { Text("🎥", fontSize = 20.sp) }
+                    }
                     if (!isGroup(chat)) {
                         IconButton(onClick = { showSafety = true }) { Text("🔒", fontSize = 20.sp) }
                         if (!iBlocked) {
@@ -366,6 +515,10 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
                     Box {
                         IconButton(onClick = { topMenu = true }) { Text("⋮", color = Color.White, fontSize = 20.sp) }
                         DropdownMenu(expanded = topMenu, onDismissRequest = { topMenu = false }) {
+                            DropdownMenuItem(text = { Text("Disappearing messages" + if ((cstate?.disappear ?: 0L) > 0) " ⏱" else "") },
+                                onClick = { topMenu = false; disDlg = true })
+                            DropdownMenuItem(text = { Text("Media and documents") },
+                                onClick = { topMenu = false; onMedia() })
                             DropdownMenuItem(text = { Text(if (isMuted) "Unmute notifications" else "Mute notifications") },
                                 onClick = { topMenu = false; if (isMuted) app.client.setMuted(chat, 0) else dlg = 1 })
                             if (!isGroup(chat)) {
@@ -378,12 +531,12 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = BarGreen, titleContentColor = Color.White,
+                    containerColor = Sky.bar, titleContentColor = Color.White,
                     navigationIconContentColor = Color.White)
             )
         }
     ) { pad ->
-        Column(Modifier.fillMaxSize().padding(pad).background(ChatBg).imePadding()) {
+        Column(Modifier.fillMaxSize().padding(pad).background(Sky.chatBg).imePadding()) {
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(), state = listState,
                 contentPadding = PaddingValues(8.dp),
@@ -408,7 +561,7 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
                 members.map { it to (names[it] ?: it) }.filter { it.second.contains(mq, ignoreCase = true) }.take(6)
             else emptyList()
             if (suggestions.isNotEmpty()) {
-                Row(Modifier.fillMaxWidth().background(Color.White).horizontalScroll(rememberScrollState())
+                Row(Modifier.fillMaxWidth().background(Sky.surface).horizontalScroll(rememberScrollState())
                     .padding(horizontal = 8.dp)) {
                     suggestions.forEach { (phone, label) ->
                         TextButton(onClick = {
@@ -421,15 +574,15 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
             if (canWrite && (replyTo != null || editing != null)) {
                 val r = replyTo
                 val ed = editing
-                Row(Modifier.fillMaxWidth().background(Color(0xFFEFEFEF)).padding(horizontal = 12.dp, vertical = 6.dp),
+                Row(Modifier.fillMaxWidth().background(Sky.surface2).padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         if (ed != null) {
-                            Text("Editing message", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = BarGreen)
+                            Text("Editing message", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Sky.accentText)
                             Text(ed.body, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color.Gray, fontSize = 13.sp)
                         } else if (r != null) {
                             Text("Replying to " + (if (r.fromMe) "yourself" else names[r.sender] ?: r.sender),
-                                fontSize = 12.sp, fontWeight = FontWeight.Bold, color = BarGreen)
+                                fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Sky.accentText)
                             Text(com.skychat.app.data.previewText(r.kind, r.body, r.fname), maxLines = 1,
                                 overflow = TextOverflow.Ellipsis, color = Color.Gray, fontSize = 13.sp)
                         }
@@ -455,21 +608,13 @@ fun ChatScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
                     Text("🔴 Recording  ${elapsed / 60}:${"%02d".format(elapsed % 60)}",
                         Modifier.weight(1f).padding(start = 8.dp))
                 } else {
-                    Box {
-                        IconButton(onClick = { menu = true }) { Text("📎", fontSize = 22.sp) }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(text = { Text("Photo") },
-                                onClick = { menu = false; pickImage.launch("image/*") })
-                            DropdownMenuItem(text = { Text("File") },
-                                onClick = { menu = false; pickFile.launch("*/*") })
-                        }
-                    }
+                    IconButton(onClick = { menu = true }) { Text("📎", fontSize = 22.sp) }
                     OutlinedTextField(
                         text, { text = it }, modifier = Modifier.weight(1f),
                         placeholder = { Text("Message") },
                         shape = RoundedCornerShape(24.dp), maxLines = 5,
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = Color.White, unfocusedContainerColor = Color.White,
+                            focusedContainerColor = Sky.surface, unfocusedContainerColor = Sky.surface,
                             focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent)
                     )
                 }
@@ -667,23 +812,23 @@ private fun Bubble(
         horizontalArrangement = if (m.fromMe) Arrangement.End else Arrangement.Start
     ) {
         Surface(
-            color = if (m.fromMe) BubbleOut else Color.White,
+            color = if (m.fromMe) Sky.bubbleOut else Sky.bubbleIn,
             shape = RoundedCornerShape(12.dp), shadowElevation = 1.dp,
             modifier = Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(12.dp))
                 .combinedClickable(onClick = {}, onLongClick = onLongPress)
         ) {
             Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                 if (senderName != null)
-                    Text(senderName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = BarGreen)
+                    Text(senderName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Sky.accentText)
                 if (m.fwd && m.kind != "deleted")
                     Text("↪ Forwarded", fontSize = 11.sp, fontStyle = FontStyle.Italic, color = Color.Gray)
                 if (m.replyId.isNotEmpty() && m.kind != "deleted") {
                     Row(Modifier.padding(vertical = 3.dp).clip(RoundedCornerShape(6.dp))
-                        .background(Color(0x14000000)).clickable { onQuote(m.replyId) }) {
-                        Box(Modifier.width(3.dp).height(36.dp).background(BarGreen))
+                        .background(Sky.divider).clickable { onQuote(m.replyId) }) {
+                        Box(Modifier.width(3.dp).height(36.dp).background(Sky.accentText))
                         Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp)) {
                             Text(if (m.quoteBy == me) "You" else names[m.quoteBy] ?: m.quoteBy,
-                                fontSize = 12.sp, fontWeight = FontWeight.Bold, color = BarGreen, maxLines = 1)
+                                fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Sky.accentText, maxLines = 1)
                             Text(m.quote, fontSize = 12.sp, color = Color.DarkGray, maxLines = 2,
                                 overflow = TextOverflow.Ellipsis)
                         }
@@ -702,6 +847,7 @@ private fun Bubble(
                         Spacer(Modifier.width(8.dp))
                         TimeAndTicks(m)
                     }
+                    LinkPreviewCard(m.preview)
                 } else {
                     MediaContent(m, app)
                     if (m.body.isNotBlank()) Text(m.body)
@@ -712,7 +858,7 @@ private fun Bubble(
                         reacts.groupBy { it.emoji }.forEach { (e, who) ->
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
-                                color = if (who.any { it.phone == me }) Color(0x3325D366) else Color(0x14000000),
+                                color = if (who.any { it.phone == me }) Color(0x3325D366) else Sky.divider,
                                 modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { onReact(e) }
                             ) {
                                 Text(if (who.size > 1) "$e ${who.size}" else e, fontSize = 13.sp,
@@ -754,6 +900,7 @@ private fun mentionText(body: String, json: String, me: String?): AnnotatedStrin
 private fun TimeAndTicks(m: Msg) {
     if (m.starred) Text("★ ", fontSize = 11.sp, color = Color(0xFFF5B301))
     if (m.edited) Text("edited  ", fontSize = 11.sp, color = Color.Gray)
+    if (m.expiresAt > 0) Text("⏱ ", fontSize = 11.sp, color = Color.Gray)
     Text(timeText(m.ts), fontSize = 11.sp, color = Color.Gray)
     if (m.fromMe) {
         Spacer(Modifier.width(3.dp))
@@ -765,10 +912,31 @@ private fun TimeAndTicks(m: Msg) {
 private fun MediaContent(m: Msg, app: SkyApp) {
     val ctx = LocalContext.current
     val hasLocal = m.localPath.isNotEmpty() && File(m.localPath).exists()
+    if (m.once != 0 && (m.kind == "image" || m.kind == "video")) {
+        val what = if (m.kind == "image") "Photo" else "Video"
+        when {
+            m.once == 2 -> Text("🔥 $what · Opened", color = Color.Gray)
+            m.fromMe -> Text("🔥 $what · View once · not opened yet", color = Color.Gray)
+            hasLocal -> Text("🔥 $what · tap to view once", fontWeight = FontWeight.Medium,
+                modifier = Modifier.clickable { ViewerBus.openOnce(m) })
+            else -> Text("🔥 $what · tap to download", color = Color.Gray, modifier = Modifier.clickable { app.client.fetch(m) })
+        }
+        return
+    }
     when (m.kind) {
         "image" ->
-            if (hasLocal) ImageThumb(app, m.localPath) { openFile(ctx, app.media, m.localPath, "image/jpeg", "photo.jpg") }
+            if (hasLocal) {
+                if (m.mime == "image/gif") GifImage(app, m.localPath) { ViewerBus.open(m.id) }
+                else ImageThumb(app, m.localPath) { ViewerBus.open(m.id) }
+            }
             else Text("📷 Photo · tap to download", color = Color.Gray,
+                modifier = Modifier.clickable { app.client.fetch(m) })
+
+        "video" ->
+            if (hasLocal) Box(Modifier.clickable { ViewerBus.open(m.id) }) {
+                MsgThumb(app, m, Modifier.size(width = 220.dp, height = 160.dp).clip(RoundedCornerShape(8.dp)), ContentScale.Crop)
+                Text(sizeText(m.size), Modifier.align(Alignment.BottomStart).padding(6.dp), color = Color.White, fontSize = 11.sp)
+            } else Text("🎥 Video · " + sizeText(m.size) + " · tap to download", color = Color.Gray,
                 modifier = Modifier.clickable { app.client.fetch(m) })
 
         "audio" -> {
@@ -782,8 +950,53 @@ private fun MediaContent(m: Msg, app: SkyApp) {
                 Text(if (playing == m.id) "⏸" else "▶", fontSize = 26.sp)
                 Spacer(Modifier.width(8.dp))
                 Text("🎤 " + durText(m.dur) + if (hasLocal) "" else " · tap to download")
+                if (playing == m.id) {
+                    val sp by AudioPlayer.speed.collectAsState()
+                    Spacer(Modifier.width(10.dp))
+                    Surface(shape = RoundedCornerShape(10.dp), color = Sky.divider,
+                        modifier = Modifier.clickable { AudioPlayer.cycleSpeed() }) {
+                        Text((if (sp == 1f) "1" else sp.toString().removeSuffix(".0")) + "×", Modifier.padding(horizontal = 8.dp, vertical = 2.dp), fontSize = 13.sp)
+                    }
+                }
             }
         }
+
+        "location" -> {
+            val parts = m.body.split(",")
+            val lat = parts.getOrNull(0)?.toDoubleOrNull(); val lon = parts.getOrNull(1)?.toDoubleOrNull()
+            Column(Modifier.clickable {
+                if (lat != null && lon != null) try {
+                    ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                        android.net.Uri.parse("geo:$lat,$lon?q=$lat,$lon(Location)")))
+                } catch (_: Exception) { Toast.makeText(ctx, "No maps app found", Toast.LENGTH_SHORT).show() }
+            }) {
+                Text("📍 Location", fontWeight = FontWeight.Medium)
+                Text(m.body.replace(",", ", "), fontSize = 12.sp, color = Color.Gray)
+                Text("Tap to open in Maps", fontSize = 12.sp, color = Sky.accentText)
+            }
+        }
+
+        "contact" -> {
+            val j = try { org.json.JSONObject(m.body) } catch (e: Exception) { org.json.JSONObject() }
+            val name = j.optString("n"); val number = j.optString("p")
+            val e164 = remember(number) { app.client.toE164(number) }
+            Column {
+                Text("👤 " + name.ifEmpty { "Contact" }, fontWeight = FontWeight.Medium)
+                Text(number, fontSize = 13.sp, color = Color.Gray)
+                Row {
+                    if (e164 != null) TextButton(onClick = { ChatNav.open(e164) }) { Text("Message") }
+                    TextButton(onClick = {
+                        ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_INSERT, android.provider.ContactsContract.Contacts.CONTENT_URI)
+                            .putExtra(android.provider.ContactsContract.Intents.Insert.NAME, name)
+                            .putExtra(android.provider.ContactsContract.Intents.Insert.PHONE, number))
+                    }) { Text("Save") }
+                }
+            }
+        }
+
+        "sticker" ->
+            if (hasLocal) ImageThumb(app, m.localPath) { ViewerBus.open(m.id) }
+            else Text("🙂 Sticker · tap to download", color = Color.Gray, modifier = Modifier.clickable { app.client.fetch(m) })
 
         "call", "info" -> Text(m.body, color = Color.DarkGray)
 
@@ -863,4 +1076,49 @@ private fun Ticks(status: Int) {
         St.READ -> Text("✓✓", fontSize = 12.sp, color = ReadBlue)
         else -> Text("!", fontSize = 12.sp, color = Color.Red)
     }
+}
+
+object ChatNav {
+    /** Opens the chat with a phone number (set by the navigation host). */
+    @Volatile var open: (String) -> Unit = {}
+}
+
+/** The title / description card the sender's phone made for the first link of a message. */
+@Composable
+private fun LinkPreviewCard(preview: String) {
+    if (preview.isEmpty()) return
+    val ctx = LocalContext.current
+    val j = try { org.json.JSONObject(preview) } catch (e: Exception) { return }
+    val url = j.optString("u")
+    if (url.isEmpty()) return
+    Column(Modifier.padding(top = 6.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Sky.divider).clickable {
+        try { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))) } catch (_: Exception) { }
+    }.padding(8.dp)) {
+        Text(j.optString("t"), fontWeight = FontWeight.Medium, maxLines = 2)
+        if (j.optString("d").isNotEmpty()) Text(j.optString("d"), fontSize = 12.sp, color = Color.Gray, maxLines = 3)
+        Text(android.net.Uri.parse(url).host ?: url, fontSize = 11.sp, color = Sky.accentText, maxLines = 1)
+    }
+}
+
+/** An animated GIF (Android 9 and newer; older phones show the first frame). */
+@Composable
+private fun GifImage(app: SkyApp, path: String, onClick: () -> Unit) {
+    val drawable by produceState<android.graphics.drawable.Drawable?>(null, path) {
+        value = withContext(Dispatchers.IO) {
+            if (android.os.Build.VERSION.SDK_INT < 28) null
+            else app.media.readBytes(File(path))?.let { b ->
+                try { android.graphics.ImageDecoder.decodeDrawable(android.graphics.ImageDecoder.createSource(java.nio.ByteBuffer.wrap(b))) }
+                catch (e: Exception) { null }
+            }
+        }
+    }
+    val d = drawable
+    if (d == null) { ImageThumb(app, path, onClick); return }
+    androidx.compose.ui.viewinterop.AndroidView(
+        factory = { c -> android.widget.ImageView(c).apply { adjustViewBounds = true; scaleType = android.widget.ImageView.ScaleType.FIT_CENTER } },
+        update = { v ->
+            v.setImageDrawable(d)
+            (d as? android.graphics.drawable.AnimatedImageDrawable)?.let { it.repeatCount = android.graphics.drawable.AnimatedImageDrawable.REPEAT_INFINITE; it.start() }
+        },
+        modifier = Modifier.widthIn(max = 240.dp).heightIn(max = 320.dp).clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick))
 }

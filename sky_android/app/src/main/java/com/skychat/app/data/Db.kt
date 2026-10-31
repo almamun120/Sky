@@ -40,13 +40,23 @@ data class Msg(
     val edited: Boolean = false,
     val fwd: Boolean = false,    // forwarded
     val starred: Boolean = false,    // local only
-    val mentions: String = ""    // JSON [["+88017..","Ana"],...]: who is @-mentioned and the label typed
+    val mentions: String = "",   // JSON [["+88017..","Ana"],...]: who is @-mentioned and the label typed
+    val preview: String = "",    // link preview built by the sender's phone: JSON {"u": url, "t": title, "d": description}
+    val once: Int = 0,           // view-once photo/video: 0 no, 1 not opened yet, 2 opened (the picture is gone)
+    val expiresAt: Long = 0      // disappearing message: when it is deleted (ms), 0 = never
 )
-// kind = text | image | audio | file | call | info | deleted (tombstone) | ctl (hidden control message:
+// kind = text | image | video | audio | file | sticker | location | contact | call | info | deleted (tombstone) | ctl (hidden control message:
 // mime = "del", "edit" or "react", replyId = target message id, body = new text for "edit" / the emoji for "react")
+
+/** Kinds whose content is an encrypted attachment on the server (the others travel inside the message itself). */
+fun hasFile(kind: String) = kind == "image" || kind == "video" || kind == "audio" || kind == "file" || kind == "sticker"
 
 fun previewText(kind: String, body: String, fname: String) = when (kind) {
     "image" -> "\uD83D\uDCF7 Photo"
+    "video" -> "\uD83C\uDFA5 Video"
+    "sticker" -> "\uD83D\uDE42 Sticker"
+    "location" -> "\uD83D\uDCCD Location"
+    "contact" -> "\uD83D\uDC64 " + (try { org.json.JSONObject(body).optString("n") } catch (e: Exception) { "" }).ifEmpty { "Contact" }
     "audio" -> "\uD83C\uDFA4 Voice message"
     "file" -> "\uD83D\uDCCE " + fname.ifEmpty { "File" }
     "deleted" -> "\uD83D\uDEAB Message deleted"
@@ -54,7 +64,7 @@ fun previewText(kind: String, body: String, fname: String) = when (kind) {
 }
 
 @Entity(tableName = "contacts")
-data class Contact(@PrimaryKey val phone: String, val name: String)
+data class Contact(@PrimaryKey val phone: String, val name: String, val local: Boolean = false)   // local = from this phone's address book
 
 @Entity(tableName = "chat_groups")
 data class ChatGroup(
@@ -72,6 +82,26 @@ data class ChatGroup(
 ) {
     fun isAdmin(phone: String?) = phone != null && (owner == phone || admins.split(",").contains(phone))
 }
+
+/** A status update (24 hours). Others' updates arrive as encrypted control messages; [mine] = I posted it. */
+@Entity(tableName = "status")
+data class StatusItem(
+    @PrimaryKey val id: String,
+    val owner: String,
+    val kind: String,          // "text" or "image"
+    val text: String,          // the text, or the caption of a photo
+    val bg: Int,               // background colour of a text update (ARGB)
+    val mid: String = "",
+    val key: String = "",
+    val path: String = "",     // vault-encrypted copy of the photo on this phone
+    val ts: Long,
+    val seen: Boolean = false,
+    val mine: Boolean = false
+)
+
+/** Who looked at one of my updates. */
+@Entity(tableName = "status_view", primaryKeys = ["statusId", "phone"])
+data class StatusView(val statusId: String, val phone: String, val ts: Long)
 
 /** What we know about another person's profile. [key] is the profile key they gave us (empty = none yet). */
 @Entity(tableName = "peer_profile")
@@ -103,7 +133,8 @@ data class ChatState(
     val pinned: Long = 0,
     val archived: Boolean = false,
     val muteUntil: Long = 0,
-    val markedUnread: Boolean = false
+    val markedUnread: Boolean = false,
+    val disappear: Long = 0      // new messages in this chat disappear after this many seconds (0 = off)
 ) {
     fun muted(now: Long = System.currentTimeMillis()) = muteUntil > now
     companion object { const val FOREVER = Long.MAX_VALUE }
@@ -229,6 +260,51 @@ interface MsgDao {
     @Query("DELETE FROM chat_state")
     suspend fun clearStates()
 
+    /** Call history: the lines CallManager writes into each chat when a call ends. */
+    @Query("SELECT * FROM messages WHERE kind = 'call' ORDER BY ts DESC LIMIT 200")
+    fun callLog(): Flow<List<Msg>>
+
+    // ---- status (updates) ----
+
+    @Query("SELECT * FROM status WHERE ts > :since ORDER BY ts")
+    fun statuses(since: Long): Flow<List<StatusItem>>
+
+    @Query("SELECT * FROM status WHERE id = :id")
+    suspend fun statusById(id: String): StatusItem?
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun putStatus(s: StatusItem): Long
+
+    @Query("UPDATE status SET seen = 1 WHERE id = :id")
+    suspend fun markStatusSeen(id: String)
+
+    @Query("DELETE FROM status WHERE id = :id")
+    suspend fun deleteStatus(id: String)
+
+    @Query("SELECT * FROM status WHERE ts <= :cutoff")
+    suspend fun oldStatuses(cutoff: Long): List<StatusItem>
+
+    @Query("DELETE FROM status WHERE ts <= :cutoff")
+    suspend fun deleteOldStatuses(cutoff: Long)
+
+    @Query("DELETE FROM status_view WHERE statusId NOT IN (SELECT id FROM status)")
+    suspend fun pruneStatusViews()
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun putStatusView(v: StatusView)
+
+    @Query("SELECT * FROM status_view WHERE statusId = :id ORDER BY ts")
+    fun viewsOf(id: String): Flow<List<StatusView>>
+
+    @Query("SELECT DISTINCT chat FROM messages")
+    suspend fun allChatIds(): List<String>
+
+    @Query("DELETE FROM status")
+    suspend fun clearStatus()
+
+    @Query("DELETE FROM status_view")
+    suspend fun clearStatusViews()
+
     // ---- profiles ----
 
     @Query("SELECT * FROM peer_profile")
@@ -270,6 +346,19 @@ interface MsgDao {
     @Query("SELECT * FROM messages WHERE chat = :chat AND fromMe = 0 AND kind IN ('text', 'image', 'audio', 'file') ORDER BY ts DESC LIMIT :n")
     suspend fun lastIncoming(chat: String, n: Int): List<Msg>
 
+    /** Photos and videos of one chat, oldest first (for the viewer and the gallery). */
+    @Query("SELECT * FROM messages WHERE chat = :chat AND kind IN ('image', 'video') AND once = 0 ORDER BY ts")
+    fun mediaOf(chat: String): Flow<List<Msg>>
+
+    @Query("SELECT * FROM messages WHERE chat = :chat AND kind = 'file' ORDER BY ts DESC")
+    fun docsOf(chat: String): Flow<List<Msg>>
+
+    @Query("SELECT * FROM contacts WHERE local = 1 ORDER BY name COLLATE NOCASE")
+    fun localContacts(): Flow<List<Contact>>
+
+    @Query("SELECT COUNT(*) FROM contacts WHERE phone = :phone AND local = 1")
+    suspend fun isLocal(phone: String): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertContact(c: Contact)
 
@@ -287,6 +376,22 @@ interface MsgDao {
 
     @Query("SELECT name FROM chat_groups WHERE gid = :gid")
     suspend fun groupName(gid: String): String?
+
+    @Query("SELECT * FROM messages WHERE expiresAt > 0 AND expiresAt <= :now AND starred = 0")
+    suspend fun expired(now: Long): List<Msg>
+
+    /** A view-once picture was opened: it is gone from this phone. */
+    @Query("UPDATE messages SET once = 2, localPath = '' WHERE id = :id")
+    suspend fun onceDone(id: String)
+
+    @Query("UPDATE messages SET once = 2, localPath = '' WHERE id = :id AND chat = :chat AND fromMe = 1")
+    suspend fun onceOpenedBy(id: String, chat: String)
+
+    @Query("UPDATE messages SET preview = :preview WHERE id = :id")
+    suspend fun setPreview(id: String, preview: String)
+
+    @Query("SELECT * FROM messages WHERE chat = :chat AND kind = 'text' AND (body LIKE '%http://%' OR body LIKE '%https://%') ORDER BY ts DESC")
+    fun linksOf(chat: String): Flow<List<Msg>>
 
     @Query("UPDATE messages SET media = :media, mkey = :mkey WHERE id = :id")
     suspend fun setMedia(id: String, media: String, mkey: String)
@@ -339,7 +444,7 @@ interface MsgDao {
 }
 
 @Database(entities = [Msg::class, Contact::class, ChatGroup::class, Kv::class, Receipt::class, Reaction::class,
-    ChatState::class, Blocked::class, PeerProfile::class], version = 10, exportSchema = false)
+    ChatState::class, Blocked::class, PeerProfile::class, StatusItem::class, StatusView::class], version = 14, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): MsgDao
 }
@@ -403,5 +508,39 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL("ALTER TABLE chat_groups ADD COLUMN admins TEXT NOT NULL DEFAULT ''")
         db.execSQL("ALTER TABLE chat_groups ADD COLUMN announce INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+/** 10 -> 11: status updates. */
+val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS `status` (`id` TEXT NOT NULL, `owner` TEXT NOT NULL, `kind` TEXT NOT NULL, " +
+            "`text` TEXT NOT NULL, `bg` INTEGER NOT NULL, `mid` TEXT NOT NULL, `key` TEXT NOT NULL, `path` TEXT NOT NULL, " +
+            "`ts` INTEGER NOT NULL, `seen` INTEGER NOT NULL, `mine` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+        db.execSQL("CREATE TABLE IF NOT EXISTS `status_view` (`statusId` TEXT NOT NULL, `phone` TEXT NOT NULL, " +
+            "`ts` INTEGER NOT NULL, PRIMARY KEY(`statusId`, `phone`))")
+    }
+}
+
+/** 11 -> 12: contacts that come from the phone's address book. */
+val MIGRATION_11_12 = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE contacts ADD COLUMN local INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+/** 12 -> 13: link previews. */
+val MIGRATION_12_13 = object : Migration(12, 13) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE messages ADD COLUMN preview TEXT NOT NULL DEFAULT ''")
+    }
+}
+
+/** 13 -> 14: view-once pictures and disappearing messages. */
+val MIGRATION_13_14 = object : Migration(13, 14) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE messages ADD COLUMN once INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE messages ADD COLUMN expiresAt INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE chat_state ADD COLUMN disappear INTEGER NOT NULL DEFAULT 0")
     }
 }

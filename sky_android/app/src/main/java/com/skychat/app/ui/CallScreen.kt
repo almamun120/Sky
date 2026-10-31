@@ -42,6 +42,29 @@ fun CallScreen(app: SkyApp, call: CallUi) {
         else askAccept.launch(need)
     }
 
+    // Sound: phone, speaker, Bluetooth, wired headset. Android 12+ needs the Bluetooth permission to list a Bluetooth headset.
+    var showRoutes by remember { mutableStateOf(false) }
+    val askBt = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { showRoutes = true }
+    fun chooseRoute() {
+        if (android.os.Build.VERSION.SDK_INT >= 31 &&
+            ctx.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+            askBt.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        else showRoutes = true
+    }
+    if (showRoutes) androidx.compose.material3.AlertDialog(
+        onDismissRequest = { showRoutes = false },
+        title = { androidx.compose.material3.Text("Sound") },
+        text = {
+            Column {
+                com.skychat.app.call.AudioRoute.available(ctx).forEach { r ->
+                    androidx.compose.material3.Text((if (r == call.route) "✓  " else "     ") + r.icon + "  " + r.label,
+                        Modifier.fillMaxWidth().clickable { showRoutes = false; calls.setRoute(r) }.padding(vertical = 12.dp))
+                }
+            }
+        },
+        confirmButton = {}, dismissButton = { androidx.compose.material3.TextButton(onClick = { showRoutes = false }) { androidx.compose.material3.Text("Cancel") } }
+    )
+
     LaunchedEffect(call.phase) {
         while (call.phase == Phase.ACTIVE) { now = System.currentTimeMillis(); delay(500) }
     }
@@ -103,7 +126,7 @@ fun CallScreen(app: SkyApp, call: CallUi) {
                 RoundButton("📞", Color(0xFF2E7D32)) { accept() }
             } else {
                 RoundButton(if (call.muted) "🔇" else "🎤", Color(0x33FFFFFF)) { calls.toggleMute() }
-                RoundButton(if (call.speaker) "🔊" else "🔈", Color(0x33FFFFFF)) { calls.toggleSpeaker() }
+                RoundButton(call.route.icon, Color(0x33FFFFFF)) { chooseRoute() }
                 if (call.video) {
                     RoundButton(if (call.camOff) "🚫" else "📷", Color(0x33FFFFFF)) { calls.toggleCamera() }
                     RoundButton("🔄", Color(0x33FFFFFF)) { calls.switchCamera() }

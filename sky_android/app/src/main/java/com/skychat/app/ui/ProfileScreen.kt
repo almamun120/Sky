@@ -45,7 +45,7 @@ fun ProfileScreen(app: SkyApp, onBack: () -> Unit) {
                 IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
             },
             colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = Accent, titleContentColor = Color.White, navigationIconContentColor = Color.White)
+                containerColor = Sky.bar, titleContentColor = Color.White, navigationIconContentColor = Color.White)
         )
     }) { pad ->
         Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState()),

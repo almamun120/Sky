@@ -11,6 +11,10 @@
     python3 test_block.py              # block and report
     python3 test_profile.py            # display name, encrypted profile blob
     python3 test_group_admin.py        # group admins, only-admins mode, invite links
+    python3 mp.py                      # self-test of the Python MessagePack helper (no server needed)
+    python3 test_contacts.py           # contact discovery by hashed phone numbers
+    python3 test_pin.py                # two-step verification PIN (uses a new random number each time)
+    python3 test_msgpack.py            # JSON + MessagePack clients together (server default config)
     python3 test_plaintext_legacy.py   # only with {require_e2e, false} in config/sys.config
 
 They cover (test_push.py: hello, bad token, ping, wake on message/call, throttling, catch-up on connect,

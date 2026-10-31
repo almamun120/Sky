@@ -14,7 +14,9 @@
          block/2, unblock/2, is_blocked/2, blocks_of/1,
          put_report/4, list_reports/0,
          put_profile/3, get_profile/1,
-         put_invite/2, get_invite/1, del_invite/1]).
+         put_invite/2, get_invite/1, del_invite/1,
+         phone_hash/1, find_by_hashes/1,
+         set_pin/2, has_pin/1, del_pin/1, check_pin/2]).
 
 -record(user, {phone, name}).
 -define(SESSION_TTL, 2592000).   %% 30 days, in seconds
@@ -24,6 +26,9 @@
 -record(otpk, {key, phone, pub}).     %% one-time prekeys, key = {Phone, Id}
 -record(presence, {phone, last_seen = undefined, share = true}).  %% last_seen in ms; share = may others see it
 -record(block, {key, blocker, blocked}).   %% key = {Blocker, Blocked}; Blocker no longer gets anything from Blocked
+-record(pin, {phone, salt, hash, ts}).      %% two-step verification PIN (salted hash, never the PIN itself)
+-record(pinfail, {phone, count, until}).    %% wrong PIN attempts (memory only)
+-record(phash, {hash, phone}).            %% contact discovery: short hash of a phone number -> phone
 -record(invite, {code, gid}).             %% group invite link: code -> group id
 -record(profile, {phone, blob, ts}).      %% blob = the owner's encrypted profile (about, photo); the server cannot read it
 -record(report, {key, ts, data}).         %% key = {Reporter, Reported}; the newest report replaces the older one
@@ -60,7 +65,16 @@ init() ->
                      {disc_copies, [node()]}]),
     create(invite, [{attributes, record_info(fields, invite)},
                     {disc_copies, [node()]}]),
-    ok = mnesia:wait_for_tables([user, session, pending, grp, keybundle, otpk, presence, block, report, profile, invite], 10000),
+    create(phash, [{attributes, record_info(fields, phash)},
+                   {disc_copies, [node()]}]),
+    create(pin, [{attributes, record_info(fields, pin)},
+                 {disc_copies, [node()]}]),
+    create(pinfail, [{attributes, record_info(fields, pinfail)},
+                     {ram_copies, [node()]}]),
+    ok = mnesia:wait_for_tables([user, session, pending, grp, keybundle, otpk, presence, block, report, profile, invite, phash, pin, pinfail], 10000),
+    %% accounts made before contact discovery existed (and a safety net): make sure every user has a hash row
+    lists:foreach(fun(P) -> mnesia:dirty_write(#phash{hash = phone_hash(P), phone = P}) end,
+                  mnesia:dirty_all_keys(user)),
     migrate_session(),
     drop_old_push_table().
 
@@ -71,6 +85,7 @@ create(Name, Opts) ->
     end.
 
 put_user(Phone, Name) ->
+    ok = mnesia:dirty_write(#phash{hash = phone_hash(Phone), phone = Phone}),
     mnesia:dirty_write(#user{phone = Phone, name = Name}).
 
 user_exists(Phone) ->
@@ -283,3 +298,68 @@ get_invite(Code) ->
     end.
 
 del_invite(Code) -> mnesia:dirty_delete(invite, Code).
+
+%% ---- contact discovery ----
+%% The app sends the first 8 bytes (16 hex characters) of SHA-256("sky-contact-v1:" ++ phone in +E.164 form) for every
+%% number in the phone book. Phone numbers are guessable, so this hides nothing from a determined server operator or
+%% from someone who tries many numbers; it only keeps the address book from travelling as plain text.
+
+phone_hash(Phone) ->
+    Full = crypto:hash(sha256, <<"sky-contact-v1:", Phone/binary>>),
+    string:lowercase(binary:encode_hex(binary:part(Full, 0, 8))).
+
+%% [{Phone, Name}] for the hashes that belong to registered users.
+find_by_hashes(Hashes) ->
+    [{P, get_name(P)} || H <- Hashes, [#phash{phone = P}] <- [mnesia:dirty_read(phash, H)]].
+
+%% ---- two-step verification PIN ----
+%% Somebody who gets your SMS code (a swapped SIM) still needs this PIN to register your number on a new phone.
+%% 5 wrong tries lock the number for 15 minutes.
+
+-define(PIN_ROUNDS, 100000).
+-define(PIN_MAX_FAILS, 5).
+-define(PIN_LOCK_MS, 900000).
+
+pin_hash(Pin, Salt) -> crypto:pbkdf2_hmac(sha256, Pin, Salt, ?PIN_ROUNDS, 32).
+
+set_pin(Phone, Pin) ->
+    Salt = crypto:strong_rand_bytes(16),
+    mnesia:dirty_delete(pinfail, Phone),
+    mnesia:dirty_write(#pin{phone = Phone, salt = Salt, hash = pin_hash(Pin, Salt), ts = os:system_time(millisecond)}).
+
+has_pin(Phone) -> mnesia:dirty_read(pin, Phone) =/= [].
+
+del_pin(Phone) ->
+    mnesia:dirty_delete(pinfail, Phone),
+    mnesia:dirty_delete(pin, Phone).
+
+%% ok | {error, wrong} | {error, locked}.  A number without a PIN always passes.
+check_pin(Phone, Pin) ->
+    Now = os:system_time(millisecond),
+    case mnesia:dirty_read(pinfail, Phone) of
+        [#pinfail{until = U}] when U > Now -> {error, locked};
+        _ ->
+            case mnesia:dirty_read(pin, Phone) of
+                [] -> ok;
+                [#pin{salt = Salt, hash = H}] ->
+                    case same_bytes(pin_hash(Pin, Salt), H) of
+                        true -> mnesia:dirty_delete(pinfail, Phone), ok;
+                        false -> pin_failed(Phone, Now), {error, wrong}
+                    end
+            end
+    end.
+
+pin_failed(Phone, Now) ->
+    Count = case mnesia:dirty_read(pinfail, Phone) of
+        [#pinfail{count = C, until = U}] when U =< Now, C >= 0 -> C + 1;
+        _ -> 1
+    end,
+    case Count >= ?PIN_MAX_FAILS of
+        true -> mnesia:dirty_write(#pinfail{phone = Phone, count = 0, until = Now + ?PIN_LOCK_MS});
+        false -> mnesia:dirty_write(#pinfail{phone = Phone, count = Count, until = 0})
+    end.
+
+%% compare without stopping at the first difference
+same_bytes(A, B) when byte_size(A) =:= byte_size(B) ->
+    lists:foldl(fun({X, Y}, Acc) -> Acc bor (X bxor Y) end, 0, lists:zip(binary_to_list(A), binary_to_list(B))) =:= 0;
+same_bytes(_, _) -> false.

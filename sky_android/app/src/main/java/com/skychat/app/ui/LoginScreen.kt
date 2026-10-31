@@ -21,7 +21,10 @@ private fun errText(code: String) = when (code) {
     "expired" -> "The code has expired. Request a new one."
     "too_many_attempts" -> "Too many wrong attempts. Request a new code."
     "connection_failed" -> "Can't reach the server."
-    "bad_url" -> "Invalid server address."
+    "bad_url" -> "Invalid server address. It must start with wss:// (or ws:// in the test version)."
+    "bad_pin" -> "Wrong PIN."
+    "pin_locked" -> "Too many wrong tries. Try again in 15 minutes."
+    "pin_expired" -> "That took too long. Start again."
     else -> code
 }
 
@@ -35,6 +38,7 @@ fun LoginScreen(app: SkyApp, onDone: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var devCode by remember { mutableStateOf<String?>(null) }
+    var pin by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         app.client.events.collect { e ->
@@ -42,7 +46,8 @@ fun LoginScreen(app: SkyApp, onDone: () -> Unit) {
             when (e) {
                 is AuthEvent.OtpSent -> { step = 1; devCode = e.devCode; error = null }
                 is AuthEvent.LoggedIn -> onDone()
-                is AuthEvent.Error -> error = errText(e.code)
+                is AuthEvent.Error -> { error = errText(e.code); if (e.code == "pin_expired") { step = 0; pin = "" } }
+                is AuthEvent.PinNeeded -> { step = 2; error = null }
                 is AuthEvent.Profile -> {}
             }
         }
@@ -53,11 +58,12 @@ fun LoginScreen(app: SkyApp, onDone: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Spacer(Modifier.height(32.dp))
-        Text("Sky", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = BarGreen)
+        Text("Sky", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Sky.accentText)
         Text("Verify your phone number to continue.")
 
         OutlinedTextField(server, { server = it }, label = { Text("Server address") },
             singleLine = true, modifier = Modifier.fillMaxWidth(), enabled = step == 0)
+        ServerNote(server)
         OutlinedTextField(phone, { phone = it }, label = { Text("Phone number") },
             singleLine = true, modifier = Modifier.fillMaxWidth(), enabled = step == 0,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
@@ -69,8 +75,17 @@ fun LoginScreen(app: SkyApp, onDone: () -> Unit) {
                     app.prefs.serverUrl = server.trim()
                     app.client.requestOtp(phone.trim())
                 },
-                enabled = !busy, modifier = Modifier.fillMaxWidth()
+                enabled = !busy && serverProblem(server) == null, modifier = Modifier.fillMaxWidth()
             ) { Text(if (busy) "Please wait…" else "Send code") }
+        } else if (step == 2) {
+            Text("Two-step verification", style = MaterialTheme.typography.titleMedium)
+            Text("This number has a PIN. Enter your 6-digit PIN to continue.")
+            OutlinedTextField(pin, { if (it.length <= 6 && it.all { c -> c.isDigit() }) pin = it }, label = { Text("PIN") },
+                singleLine = true, modifier = Modifier.fillMaxWidth(),
+                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
+            Button(onClick = { error = null; busy = true; app.client.verifyPin(pin) },
+                enabled = !busy && pin.length == 6, modifier = Modifier.fillMaxWidth()) { Text(if (busy) "Please wait…" else "Continue") }
         } else {
             devCode?.let { Text("Dev mode code: $it", color = Accent) }
             OutlinedTextField(code, { code = it }, label = { Text("6-digit code") },

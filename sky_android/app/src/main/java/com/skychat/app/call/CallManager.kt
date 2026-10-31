@@ -57,10 +57,11 @@ data class CallUi(
     val startedAt: Long = 0,
     val muted: Boolean = false,
     val camOff: Boolean = false,
-    val speaker: Boolean = false
+    val speaker: Boolean = false,
+    val route: Route = Route.EARPIECE
 )
 
-private class SdpAdapter(
+internal class SdpAdapter(
     private val onCreate: (SessionDescription) -> Unit = {},
     private val onSet: () -> Unit = {},
     private val onFail: (String) -> Unit = {}
@@ -112,7 +113,7 @@ class CallManager(
     // ---------------- public API ----------------
 
     fun start(peer: String, video: Boolean) = exec.execute {
-        if (ui.value.phase != Phase.IDLE) return@execute
+        if (ui.value.phase != Phase.IDLE || GroupCallState.active) return@execute
         if (client.state.value != Conn.Online) {
             client.events.tryEmit(AuthEvent.Error("no_connection")); return@execute
         }
@@ -204,11 +205,9 @@ class CallManager(
 
     fun switchCamera() = exec.execute { (capturer as? CameraVideoCapturer)?.switchCamera(null) }
 
-    @Suppress("DEPRECATION")
-    fun toggleSpeaker() = exec.execute {
-        val on = !ui.value.speaker
-        audio.isSpeakerphoneOn = on
-        ui.update { it.copy(speaker = on) }
+    fun setRoute(r: Route) = exec.execute {
+        AudioRoute.select(ctx, r)
+        ui.update { it.copy(route = r, speaker = r == Route.SPEAKER) }
     }
 
     fun attachRemote(r: SurfaceViewRenderer) { remoteSink = r; remoteVideo?.addSink(r) }
@@ -224,7 +223,7 @@ class CallManager(
             "call_in" -> {
                 if (c == cid) return@execute                       // duplicate delivery
                 val from = o.getString("from")
-                if (ui.value.phase != Phase.IDLE) {
+                if (ui.value.phase != Phase.IDLE || GroupCallState.active) {
                     client.sendJson(endJson(c, from, "busy")); return@execute
                 }
                 // The offer must open with our Signal session, otherwise it is not from who it claims.
@@ -276,7 +275,7 @@ class CallManager(
 
     // ---------------- WebRTC ----------------
 
-    private fun factory(): PeerConnectionFactory {
+    internal fun factory(): PeerConnectionFactory {
         factory?.let { return it }
         PeerConnectionFactory.initialize(
             PeerConnectionFactory.InitializationOptions.builder(ctx).createInitializationOptions())
@@ -288,7 +287,7 @@ class CallManager(
         return f
     }
 
-    private fun iceServers(): List<PeerConnection.IceServer> {
+    internal fun iceServers(): List<PeerConnection.IceServer> {
         val out = ArrayList<PeerConnection.IceServer>()
         val arr = client.iceJson
         if (arr != null) {
@@ -453,16 +452,18 @@ class CallManager(
     @Suppress("DEPRECATION")
     private fun setupAudio(video: Boolean) {
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
-        audio.isSpeakerphoneOn = video
+        val r = AudioRoute.best(ctx, video)
+        AudioRoute.select(ctx, r)
+        ui.update { it.copy(route = r, speaker = r == Route.SPEAKER) }
     }
 
     @Suppress("DEPRECATION")
     private fun resetAudio() {
-        audio.isSpeakerphoneOn = false
+        AudioRoute.clear(ctx)
         audio.mode = AudioManager.MODE_NORMAL
     }
 
-    private fun startRinging(name: String, video: Boolean) {
+    internal fun startRinging(name: String, video: Boolean) {
         if (client.foreground) {
             ringtone = RingtoneManager.getRingtone(ctx, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
                 ?.apply { if (Build.VERSION.SDK_INT >= 28) isLooping = true; play() }
@@ -471,16 +472,16 @@ class CallManager(
         }
     }
 
-    private fun stopRinging() {
+    internal fun stopRinging() {
         ringtone?.stop(); ringtone = null
         notifier.cancelIncomingCall()
     }
 
-    private fun startService() {
+    internal fun startService() {
         try { ContextCompat.startForegroundService(ctx, Intent(ctx, CallService::class.java)) } catch (_: Exception) {}
     }
 
-    private fun stopService() {
+    internal fun stopService() {
         try { ctx.stopService(Intent(ctx, CallService::class.java)) } catch (_: Exception) {}
     }
 }

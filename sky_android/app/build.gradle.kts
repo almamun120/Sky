@@ -12,8 +12,8 @@ android {
         applicationId = "com.skychat.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.11.0"
+        versionCode = 22
+        versionName = "0.22.0"
     }
     // Signing comes from environment variables (set by the GitHub workflow); without them the release APK is unsigned.
     val keystore: String? = System.getenv("SKY_KEYSTORE_FILE")
@@ -26,7 +26,10 @@ android {
         }
     }
     buildTypes {
+        // ws:// (no encryption) is allowed in the debug build only; the release build refuses all cleartext traffic.
+        debug { manifestPlaceholders["cleartext"] = "true" }
         release {
+            manifestPlaceholders["cleartext"] = "false"
             isMinifyEnabled = false
             if (keystore != null) signingConfig = signingConfigs.getByName("release")
         }
@@ -55,6 +58,7 @@ dependencies {
     implementation("org.signal:libsignal-client:0.94.4")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")   // QR code scanner (brings zxing core for drawing codes)
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")

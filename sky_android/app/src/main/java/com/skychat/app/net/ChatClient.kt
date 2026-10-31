@@ -15,6 +15,8 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.asRequestBody
 import java.io.File
 import android.util.Base64
+import okio.ByteString
+import okio.ByteString.Companion.toByteString
 import com.skychat.app.crypto.*
 import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.*
@@ -28,6 +30,7 @@ sealed interface AuthEvent {
     data class OtpSent(val devCode: String?) : AuthEvent
     data object LoggedIn : AuthEvent
     data class Error(val code: String) : AuthEvent
+    data object PinNeeded : AuthEvent
     data class Profile(val phone: String, val name: String?, val exists: Boolean) : AuthEvent
 }
 
@@ -63,7 +66,10 @@ class ChatClient(
     private var connectedUrl: String? = null
     @Volatile private var open = false
     @Volatile private var authBusy = false
-    @Volatile private var firstFrame: String? = null
+    @Volatile private var firstFrame: JSONObject? = null
+    /** true = this connection speaks MessagePack (binary frames), false = JSON text. Set when it opens. */
+    @Volatile private var binary = false
+    private val debuggable: Boolean get() = (ctx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
     @Volatile private var pendingPhone: String? = null
     @Volatile private var wantOnline = false
     private var retry = 0
@@ -86,10 +92,15 @@ class ChatClient(
     private var idleJob: Job? = null
 
     var calls: CallManager? = null
+    val myPhone: String? get() = prefs.phone
+    @Volatile var groupCalls: com.skychat.app.call.GroupCallManager? = null
     @Volatile var keepAlive = false            // true during a call: no idle disconnect
     @Volatile var iceJson: org.json.JSONArray? = null
 
-    fun sendJson(o: JSONObject): Boolean = ws?.send(o.toString()) ?: false
+    fun sendJson(o: JSONObject): Boolean = ws?.let { sendFrame(it, o) } ?: false
+
+    private fun sendFrame(w: WebSocket, o: JSONObject): Boolean =
+        if (binary) w.send(MsgPack.encode(o).toByteString()) else w.send(o.toString())
 
     // ---- end-to-end encryption state ----
     private val vault = Vault()
@@ -109,12 +120,30 @@ class ChatClient(
         connect()
     }
 
+    /** Dev option: use another server address right away (also while logged in). */
+    @Synchronized
+    fun changeServer(url: String) {
+        ServerUrl.problem(url, debuggable)?.let { events.tryEmit(AuthEvent.Error("bad_url")); return }
+        prefs.serverUrl = url.trim()
+        ws?.cancel(); ws = null; open = false
+        state.value = Conn.Offline
+        if (wantOnline) connect()
+    }
+
     @Synchronized
     private fun connect() {
         if (ws != null) return
         val url = prefs.serverUrl
+        ServerUrl.problem(url, debuggable)?.let {
+            authBusy = false
+            events.tryEmit(AuthEvent.Error("bad_url"))
+            return
+        }
         val req = try {
-            Request.Builder().url(url).build()
+            Request.Builder().url(url)
+                // the wire format we would like; the server picks one it allows (no answer = an old server = JSON)
+                .header("Sec-WebSocket-Protocol", if (prefs.preferJson) "sky.json" else "sky.msgpack, sky.json")
+                .build()
         } catch (e: IllegalArgumentException) {
             authBusy = false
             events.tryEmit(AuthEvent.Error("bad_url"))
@@ -127,13 +156,18 @@ class ChatClient(
 
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            binary = response.header("Sec-WebSocket-Protocol") == "sky.msgpack"
             open = true
             retry = 0
             val f = firstFrame
             firstFrame = null
             val t = prefs.token
-            if (f != null) webSocket.send(f)
-            else if (t != null) webSocket.send(js("type" to "auth", "token" to t).toString())
+            if (f != null) sendFrame(webSocket, f)
+            else if (t != null) sendFrame(webSocket, js("type" to "auth", "token" to t))
+        }
+
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            serial.launch { runCatching { MsgPack.decode(bytes.toByteArray())?.let { handle(it) } } }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -180,6 +214,25 @@ class ChatClient(
         sendAuth(js("type" to "request_otp", "phone" to phone))
     }
 
+    val pinOnFlow = MutableStateFlow(false)
+
+    /** The second step of a login: the two-step verification PIN. */
+    fun verifyPin(pin: String) {
+        authBusy = true
+        wsSend(js("type" to "verify_pin", "pin" to pin))
+    }
+
+    /** Sets or changes the two-step PIN ([old] is needed when one is already set). */
+    fun setPin(pin: String, old: String) {
+        if (!open) { events.tryEmit(AuthEvent.Error("no_connection")); return }
+        wsSend(js("type" to "set_pin", "pin" to pin, "old" to old))
+    }
+
+    fun removePin(pin: String) {
+        if (!open) { events.tryEmit(AuthEvent.Error("no_connection")); return }
+        wsSend(js("type" to "remove_pin", "pin" to pin))
+    }
+
     fun verifyOtp(phone: String, code: String, name: String) {
         pendingPhone = phone
         prefs.name = name.trim()
@@ -194,9 +247,9 @@ class ChatClient(
         }
         val w = ws
         if (w != null && open) {
-            w.send(frame.toString())
+            sendFrame(w, frame)
         } else {
-            firstFrame = frame.toString()
+            firstFrame = frame
             wantOnline = true
             connect()
         }
@@ -235,7 +288,7 @@ class ChatClient(
         ws?.close(1000, null)
         serial.launch {
             dao.deleteAll(); dao.clearReactions(); dao.deleteContacts(); dao.deleteGroups(); dao.deleteReceipts(); dao.kvClear()
-            dao.clearStates(); dao.clearBlocked(); dao.clearPeerProfiles(); lastProfileFetch.clear()
+            dao.clearStates(); dao.clearBlocked(); dao.clearPeerProfiles(); dao.clearStatus(); dao.clearStatusViews(); lastProfileFetch.clear()
             crypto = null; awaiting.clear(); requested.clear()
             media.clearAll()
         }
@@ -309,6 +362,235 @@ class ChatClient(
         bg.launch {
             state.first { it == Conn.Online }
             joinInvite(raw)
+        }
+    }
+
+    // ---- status (24-hour updates) ----
+    // An update is sent to every person I chat with (not blocked) as an encrypted control message; photos are
+    // encrypted with their own key, which travels inside that message. The server never sees an update.
+
+    private val STATUS_LIFE = 24 * 3600_000L
+
+    private suspend fun statusRecipients(): List<String> =
+        dao.allChatIds().filter { !isGroup(it) && it != prefs.phone && dao.isBlocked(it) == 0 }
+
+    private suspend fun sendCtlToAll(op: String, body: String) {
+        statusRecipients().forEach {
+            enqueue(Msg(UUID.randomUUID().toString(), it, true, body, System.currentTimeMillis(),
+                St.PENDING, true, kind = "ctl", mime = op))
+        }
+    }
+
+    private suspend fun publishStatus(s: StatusItem) {
+        dao.putStatus(s)
+        sendCtlToAll("status", JSONObject().put("i", s.id).put("k", s.kind).put("t", s.text).put("c", s.bg)
+            .put("m", s.mid).put("x", s.key).put("ts", s.ts).toString())
+    }
+
+    fun postTextStatus(text: String, color: Int) {
+        val t = text.trim().take(700)
+        if (t.isEmpty()) return
+        bg.launch {
+            publishStatus(StatusItem(UUID.randomUUID().toString(), prefs.phone ?: return@launch, "text", t, color,
+                ts = System.currentTimeMillis(), seen = true, mine = true))
+        }
+    }
+
+    fun postImageStatus(uri: Uri, caption: String) {
+        if (!open) { events.tryEmit(AuthEvent.Error("no_connection")); return }
+        bg.launch {
+            val id = UUID.randomUUID().toString()
+            val plain = File(media.tmpDir, "$id.st")
+            val enc = File(ctx.cacheDir, "$id.st.enc")
+            try {
+                if (!prepareImage(uri, plain)) { events.emit(AuthEvent.Error("bad_file")); return@launch }
+                val key = MediaCrypto.encrypt(plain, enc)
+                val mid = upload(enc, "application/octet-stream")
+                if (mid == null) { events.emit(AuthEvent.Error("upload_failed")); return@launch }
+                val out = File(mediaDir, "st_$id.jpg")
+                if (!media.store(plain, out)) { events.emit(AuthEvent.Error("bad_file")); return@launch }
+                publishStatus(StatusItem(id, prefs.phone ?: return@launch, "image", caption.trim().take(300), 0,
+                    mid = mid, key = b64(key), path = out.absolutePath, ts = System.currentTimeMillis(),
+                    seen = true, mine = true))
+            } finally { media.shred(plain); enc.delete() }
+        }
+    }
+
+    fun deleteStatus(id: String) {
+        bg.launch {
+            val s = dao.statusById(id) ?: return@launch
+            if (s.path.isNotEmpty()) media.shred(File(s.path))
+            dao.deleteStatus(id)
+            if (s.mine) sendCtlToAll("sdel", id)
+        }
+    }
+
+    /** I looked at someone's update: tell the owner (once). */
+    fun markStatusSeen(id: String) {
+        serial.launch {
+            val s = dao.statusById(id) ?: return@launch
+            if (s.mine || s.seen) return@launch
+            dao.markStatusSeen(id)
+            enqueue(Msg(UUID.randomUUID().toString(), s.owner, true, id, System.currentTimeMillis(),
+                St.PENDING, true, kind = "ctl", mime = "sview"))
+        }
+    }
+
+    private suspend fun onStatus(from: String, body: String) {
+        val j = try { JSONObject(body) } catch (e: Exception) { return }
+        val id = j.optString("i").takeIf { it.isNotEmpty() && it.length <= 64 } ?: return
+        val now = System.currentTimeMillis()
+        val ts = minOf(j.optLong("ts", now), now)
+        if (ts <= now - STATUS_LIFE || dao.statusById(id) != null) return
+        val kind = j.optString("k")
+        val text = j.optString("t").take(700)
+        if (kind == "text") {
+            if (text.isEmpty()) return
+            dao.putStatus(StatusItem(id, from, "text", text, j.optInt("c"), ts = ts))
+        } else if (kind == "image") {
+            val mid = j.optString("m").takeIf { it.length == 32 } ?: return
+            val path = downloadPhoto(mid, j.optString("x"), "st_$id.jpg") ?: return
+            dao.putStatus(StatusItem(id, from, "image", text.take(300), 0, mid, j.optString("x"), path, ts))
+        }
+    }
+
+    private suspend fun onStatusDeleted(from: String, id: String) {
+        val s = dao.statusById(id) ?: return
+        if (s.owner != from || s.mine) return
+        if (s.path.isNotEmpty()) media.shred(File(s.path))
+        dao.deleteStatus(id)
+    }
+
+    private suspend fun onStatusView(from: String, id: String) {
+        if (dao.statusById(id)?.mine == true) dao.putStatusView(StatusView(id, from, System.currentTimeMillis()))
+    }
+
+    /** Updates older than 24 hours disappear (called at every login). */
+    private suspend fun expireStatuses() {
+        val cutoff = System.currentTimeMillis() - STATUS_LIFE
+        dao.oldStatuses(cutoff).forEach { if (it.path.isNotEmpty()) media.shred(File(it.path)) }
+        dao.deleteOldStatuses(cutoff)
+        dao.pruneStatusViews()
+    }
+
+    // ---- friends from the phone's address book ----
+    // Only short hashes of the numbers are sent (see the server README); the names stay on this phone.
+
+    private val bookByHash = HashMap<String, Pair<String, String>>()     // hash -> (+E.164, name in the address book)
+
+    private fun contactHash(e164: String): String {
+        val d = java.security.MessageDigest.getInstance("SHA-256").digest(("sky-contact-v1:" + e164).toByteArray())
+        return d.take(8).joinToString("") { "%02x".format(it) }
+    }
+
+    fun hasContactsPermission() =
+        ctx.checkSelfPermission(android.Manifest.permission.READ_CONTACTS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    /** Reads the address book, asks the server which numbers are on Sky, and saves those people as contacts. */
+    fun syncContacts() {
+        if (!open) { events.tryEmit(AuthEvent.Error("no_connection")); return }
+        if (!hasContactsPermission()) return
+        bg.launch {
+            val tm = ctx.getSystemService(Context.TELEPHONY_SERVICE) as? android.telephony.TelephonyManager
+            val iso = (tm?.simCountryIso?.ifEmpty { null } ?: tm?.networkCountryIso?.ifEmpty { null }
+                ?: java.util.Locale.getDefault().country.ifEmpty { null } ?: "BD").uppercase()
+            val book = HashMap<String, Pair<String, String>>()
+            ctx.contentResolver.query(android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                arrayOf(android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER,
+                    android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME), null, null, null)?.use { c ->
+                while (c.moveToNext()) {
+                    val number = c.getString(0) ?: continue
+                    val e164 = android.telephony.PhoneNumberUtils.formatNumberToE164(number, iso) ?: continue
+                    if (e164 == prefs.phone) continue
+                    book.putIfAbsent(contactHash(e164), e164 to (c.getString(1) ?: ""))
+                }
+            }
+            synchronized(bookByHash) { bookByHash.clear(); bookByHash.putAll(book) }
+            prefs.lastContactSync = System.currentTimeMillis()
+            book.keys.chunked(400).forEach { wsSend(js("type" to "find_contacts", "hashes" to org.json.JSONArray(it))) }
+        }
+    }
+
+    private suspend fun onContactsFound(o: JSONObject) {
+        val arr = o.getJSONArray("matches")
+        for (i in 0 until arr.length()) {
+            val m = arr.getJSONObject(i)
+            val phone = m.getString("phone")
+            val mine = synchronized(bookByHash) { bookByHash[contactHash(phone)]?.second }?.takeIf { it.isNotBlank() }
+            // the name from the address book wins over the name the person chose for themselves
+            dao.upsertContact(Contact(phone, mine ?: m.optString("name").ifEmpty { phone }, local = true))
+        }
+    }
+
+    // ---- group calls: signalling is an end-to-end encrypted control message between two people ----
+
+    fun sendGc(peer: String, body: String) {
+        bg.launch {
+            enqueue(Msg(UUID.randomUUID().toString(), peer, true, body, System.currentTimeMillis(),
+                St.PENDING, true, kind = "ctl", mime = "gc"))
+        }
+    }
+
+    private suspend fun onGroupCallSignal(from: String, body: String) {
+        val j = try { JSONObject(body) } catch (e: Exception) { return }
+        val g = j.optString("gid").takeIf { it.isNotEmpty() }?.let { dao.group(it) }
+        val name = dao.contactName(from)?.ifEmpty { null } ?: from
+        groupCalls?.onSignal(from, j, g?.members?.split(",")?.filter { it.isNotEmpty() } ?: emptyList(), g?.name ?: "", name)
+    }
+
+    // ---- disappearing messages, view once ----
+
+    private val disappearChoices = setOf(0L, 86_400L, 604_800L, 7_776_000L)
+
+    private fun disLabel(s: Long) = when { s <= 0 -> "off"; s <= 86_400 -> "24 hours"; s <= 604_800 -> "7 days"; else -> "90 days" }
+
+    /** New messages of this chat disappear after [seconds] (0 = off). In a group only admins may change it. */
+    fun setDisappear(chat: String, seconds: Long) {
+        if (seconds !in disappearChoices) return
+        serial.launch {
+            if (isGroup(chat) && dao.group(chat)?.isAdmin(prefs.phone) != true) { events.emit(AuthEvent.Error("not_admin")); return@launch }
+            val st = stateOf(chat)
+            if (st.disappear == seconds) return@launch
+            dao.putState(st.copy(disappear = seconds))
+            info(chat, if (seconds == 0L) "You turned off disappearing messages" else "You turned on disappearing messages: ${disLabel(seconds)}")
+            enqueue(Msg(UUID.randomUUID().toString(), chat, true, seconds.toString(), System.currentTimeMillis(),
+                St.PENDING, true, kind = "ctl", mime = "dis"))
+        }
+    }
+
+    private suspend fun onDisappearSet(from: String, chat: String, body: String) {
+        val sec = body.toLongOrNull() ?: return
+        if (sec !in disappearChoices) return
+        if (isGroup(chat) && dao.group(chat)?.isAdmin(from) != true) return
+        val st = stateOf(chat)
+        if (st.disappear == sec) return
+        dao.putState(st.copy(disappear = sec))
+        val who = dao.contactName(from)?.ifEmpty { null } ?: from
+        info(chat, if (sec == 0L) "$who turned off disappearing messages" else "$who turned on disappearing messages: ${disLabel(sec)}")
+    }
+
+    @Volatile private var housekeeping = false
+
+    /** Deletes disappearing messages when their time has come (checked every 30 seconds while the app runs). */
+    fun startHousekeeping() {
+        if (housekeeping) return
+        housekeeping = true
+        bg.launch { while (true) { try { purgeExpired() } catch (_: Exception) { }; delay(30_000) } }
+    }
+
+    private suspend fun purgeExpired() {
+        dao.expired(System.currentTimeMillis()).forEach {
+            shredMedia(it.localPath); dao.deleteReactions(it.id); dao.deleteLocal(it.id)
+        }
+    }
+
+    /** The receiver closed a view-once picture: delete it here and tell the sender that it was opened. */
+    fun viewOnceDone(m: Msg) {
+        bg.launch {
+            shredMedia(m.localPath)
+            dao.onceDone(m.id)
+            enqueue(Msg(UUID.randomUUID().toString(), m.chat, true, m.id, System.currentTimeMillis(),
+                St.PENDING, true, kind = "ctl", mime = "ovw"))
         }
     }
 
@@ -514,7 +796,7 @@ class ChatClient(
                 true
             }
             val out = File(mediaDir, fileName)
-            if (got && enc.length() in 1..(2L * 1024 * 1024) && MediaCrypto.decrypt(enc, plain, unb64(keyB64)) &&
+            if (got && enc.length() in 1..(8L * 1024 * 1024) && MediaCrypto.decrypt(enc, plain, unb64(keyB64)) &&
                 media.store(plain, out)) out.absolutePath else null
         } catch (e: Exception) { null } finally { enc.delete(); media.shred(plain) }
     }
@@ -616,19 +898,129 @@ class ChatClient(
 
     fun send(to: String, body: String, reply: Msg? = null, mentions: String = "") {
         val me = prefs.phone ?: ""
-        val m = Msg(UUID.randomUUID().toString(), to, true, body,
+        val m0 = Msg(UUID.randomUUID().toString(), to, true, body,
             System.currentTimeMillis(), St.PENDING, true,
             replyId = reply?.id ?: "",
             quote = reply?.let { quoteText(it) } ?: "",
             quoteBy = reply?.let { if (it.fromMe) me else it.sender } ?: "",
             mentions = mentions)
         serial.launch {
+            val m = stamp(m0)
             dao.insert(m)
             unarchive(to)
             shareProfileKey(to)
-            if (state.value == Conn.Online) transmit(m)
+            var out = m
+            if (prefs.linkPreviews) buildLinkPreview(body)?.let { dao.setPreview(m.id, it); out = m.copy(preview = it) }
+            if (state.value == Conn.Online) transmit(out)
         }
         if (state.value == Conn.Offline && prefs.token != null) start()
+    }
+
+    // ---- link preview: made by the sender's phone (title and description of the first link) ----
+
+    /** What we accept from a message: a small JSON with an http(s) address. */
+    private fun cleanPreview(o: JSONObject?): String {
+        if (o == null) return ""
+        val u = o.optString("u")
+        if (!(u.startsWith("http://") || u.startsWith("https://")) || u.length > 500) return ""
+        return JSONObject().put("u", u).put("t", o.optString("t").take(150)).put("d", o.optString("d").take(250)).toString()
+    }
+
+    private fun htmlText(s: String) = s.replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'")
+        .replace("&apos;", "'").replace("&lt;", "<").replace("&gt;", ">").replace(Regex("\\s+"), " ").trim()
+
+    private fun metaContent(html: String, key: String): String? {
+        val k = Regex.escape(key)
+        val a = Regex("<meta[^>]+(?:property|name)=[\"']$k[\"'][^>]*content=[\"']([^\"']*)[\"']", RegexOption.IGNORE_CASE).find(html)
+        val b = Regex("<meta[^>]+content=[\"']([^\"']*)[\"'][^>]*(?:property|name)=[\"']$k[\"']", RegexOption.IGNORE_CASE).find(html)
+        return (a ?: b)?.groupValues?.get(1)?.let { htmlText(it) }?.takeIf { it.isNotEmpty() }
+    }
+
+    private suspend fun buildLinkPreview(text: String): String? = withContext(Dispatchers.IO) {
+        val url = Regex("https?://[^\\s<>\"]+").find(text)?.value?.trimEnd('.', ',', ')', '!', '?', ';', ':') ?: return@withContext null
+        try {
+            val client = http.newBuilder().callTimeout(4, java.util.concurrent.TimeUnit.SECONDS).build()
+            val req = Request.Builder().url(url).header("User-Agent", "Mozilla/5.0 (compatible; SkyLinkPreview)")
+                .header("Accept", "text/html").build()
+            client.newCall(req).execute().use { r ->
+                if (!r.isSuccessful || r.body == null || r.header("Content-Type")?.contains("text/html", true) != true) return@use null
+                val buf = java.io.ByteArrayOutputStream()
+                r.body!!.byteStream().use { i ->
+                    val chunk = ByteArray(8192)
+                    while (buf.size() < 200_000) { val n = i.read(chunk); if (n < 0) break; buf.write(chunk, 0, n) }
+                }
+                val html = buf.toString("UTF-8")
+                val title = metaContent(html, "og:title")
+                    ?: Regex("<title[^>]*>([^<]*)</title>", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)?.let { htmlText(it) }
+                if (title.isNullOrEmpty()) return@use null
+                val desc = metaContent(html, "og:description") ?: metaContent(html, "description") ?: ""
+                JSONObject().put("u", url).put("t", title.take(150)).put("d", desc.take(250)).toString()
+            }
+        } catch (e: Exception) { null }
+    }
+
+    // ---- location, contact card, sticker, GIF ----
+
+    fun sendLocation(chat: String, lat: Double, lon: Double) {
+        bg.launch {
+            enqueue(Msg(UUID.randomUUID().toString(), chat, true, String.format(java.util.Locale.US, "%.6f,%.6f", lat, lon),
+                System.currentTimeMillis(), St.PENDING, true, kind = "location"))
+        }
+    }
+
+    fun sendContactCard(chat: String, name: String, number: String) {
+        bg.launch {
+            enqueue(Msg(UUID.randomUUID().toString(), chat, true, JSONObject().put("n", name.take(100)).put("p", number.take(40)).toString(),
+                System.currentTimeMillis(), St.PENDING, true, kind = "contact"))
+        }
+    }
+
+    /** A phone number as written in an address book -> +E.164 (null if it cannot be made one). */
+    fun toE164(number: String): String? {
+        val tm = ctx.getSystemService(Context.TELEPHONY_SERVICE) as? android.telephony.TelephonyManager
+        val iso = (tm?.simCountryIso?.ifEmpty { null } ?: tm?.networkCountryIso?.ifEmpty { null }
+            ?: java.util.Locale.getDefault().country.ifEmpty { null } ?: "BD").uppercase()
+        return android.telephony.PhoneNumberUtils.formatNumberToE164(number, iso)
+    }
+
+    /** An animated GIF is sent untouched (it would lose its animation if it were re-encoded). */
+    fun sendGif(chat: String, uri: Uri) {
+        bg.launch {
+            val (_, size) = queryMeta(uri)
+            if (size > maxUpload - 1024) { events.emit(AuthEvent.Error("too_large")); return@launch }
+            val id = UUID.randomUUID().toString()
+            val out = File(mediaDir, "$id.gif")
+            val plain = File(media.tmpDir, "$id.in")
+            val ok = ctx.contentResolver.openInputStream(uri)?.use { i -> plain.outputStream().use { o -> i.copyTo(o) }; true } ?: false
+            val len = plain.length()
+            if (!ok || len > maxUpload - 1024 || !media.store(plain, out)) {
+                media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return@launch
+            }
+            enqueue(Msg(id, chat, true, "", System.currentTimeMillis(), St.PENDING, true, kind = "image",
+                fname = "animation.gif", mime = "image/gif", size = len, localPath = out.absolutePath))
+        }
+    }
+
+    /** A picture sent as a sticker: at most 512 px, PNG so that transparent parts stay transparent. */
+    fun sendSticker(chat: String, uri: Uri) {
+        bg.launch {
+            val id = UUID.randomUUID().toString()
+            val out = File(mediaDir, "$id.png")
+            val plain = File(media.tmpDir, "$id.in")
+            val made = try {
+                val b = ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+                if (b == null) false else {
+                    val sc = 512f / maxOf(b.width, b.height)
+                    val r = if (sc < 1f) Bitmap.createScaledBitmap(b, (b.width * sc).toInt().coerceAtLeast(1), (b.height * sc).toInt().coerceAtLeast(1), true) else b
+                    plain.outputStream().use { r.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    true
+                }
+            } catch (e: Exception) { false }
+            val len = plain.length()
+            if (!made || !media.store(plain, out)) { media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return@launch }
+            enqueue(Msg(id, chat, true, "", System.currentTimeMillis(), St.PENDING, true, kind = "sticker",
+                fname = "sticker.png", mime = "image/png", size = len, localPath = out.absolutePath))
+        }
     }
 
     private fun quoteText(m: Msg) = previewText(m.kind, m.body, m.fname).take(200)
@@ -642,11 +1034,13 @@ class ChatClient(
             val now = System.currentTimeMillis()
             when (m.kind) {
                 "text" -> enqueue(Msg(id, to, true, m.body, now, St.PENDING, true, fwd = true))
-                "image", "audio", "file" -> {
+                "location", "contact" -> enqueue(Msg(id, to, true, m.body, now, St.PENDING, true, kind = m.kind, fwd = true))
+                "image", "video", "audio", "file", "sticker" -> {
                     if (m.localPath.isEmpty()) { events.emit(AuthEvent.Error("bad_file")); return@launch }
                     val ext = File(m.localPath).extension.take(8)
                     val out = File(mediaDir, id + if (ext.isEmpty()) "" else ".$ext")
                     val tmp = media.toTemp(File(m.localPath), m.fname.ifEmpty { "file" })
+                    if (tmp != null && m.kind == "video") makeVideoThumb(tmp, File(out.absolutePath + ".thumb"))
                     if (tmp == null || !media.store(tmp, out)) {
                         tmp?.let { media.shred(it) }; events.emit(AuthEvent.Error("bad_file")); return@launch
                     }
@@ -672,13 +1066,20 @@ class ChatClient(
 
     fun star(m: Msg, on: Boolean) { bg.launch { dao.setStar(m.id, on) } }
 
+    /** Deletes a stored attachment and, for videos, its small preview picture. */
+    private fun shredMedia(path: String) {
+        if (path.isEmpty()) return
+        media.shred(File(path))
+        File("$path.thumb").let { if (it.exists()) media.shred(it) }
+    }
+
     /** Removes a message from this phone only. */
     fun deleteForMe(m: Msg) {
         bg.launch {
             val path = m.localPath
             dao.deleteReactions(m.id)
             dao.deleteLocal(m.id)
-            if (path.isNotEmpty()) media.shred(File(path))
+            shredMedia(path)
         }
     }
 
@@ -696,7 +1097,7 @@ class ChatClient(
                 enqueue(Msg(UUID.randomUUID().toString(), cur.chat, true, "", System.currentTimeMillis(),
                     St.PENDING, true, kind = "ctl", mime = "del", replyId = cur.id))
             }
-            if (path.isNotEmpty()) media.shred(File(path))
+            shredMedia(path)
         }
     }
 
@@ -718,6 +1119,12 @@ class ChatClient(
         when (p.optString("op")) {                      // controls that do not point at a message
             "pkey" -> { if (!isGroup(chat)) onProfileKey(from, p.optString("b")); return }
             "ginfo" -> { if (isGroup(chat)) onGroupInfo(from, chat, p.optString("b")); return }
+            "dis" -> { onDisappearSet(from, chat, p.optString("b")); return }
+            "gc" -> { if (!isGroup(chat)) onGroupCallSignal(from, p.optString("b")); return }
+            "ovw" -> { if (!isGroup(chat)) dao.onceOpenedBy(p.optString("b"), chat); return }
+            "status" -> { if (!isGroup(chat)) onStatus(from, p.optString("b")); return }
+            "sview" -> { if (!isGroup(chat)) onStatusView(from, p.optString("b")); return }
+            "sdel" -> { if (!isGroup(chat)) onStatusDeleted(from, p.optString("b")); return }
         }
         val tid = p.optString("tid")
         if (tid.isEmpty()) return
@@ -727,7 +1134,7 @@ class ChatClient(
                 if (path != null) {
                     dao.tombstone(tid, chat, 0, from)
                     dao.deleteReactions(tid)
-                    if (path.isNotEmpty()) media.shred(File(path))
+                    shredMedia(path)
                 }
             }
             "react" -> {
@@ -750,7 +1157,7 @@ class ChatClient(
      */
     private suspend fun transmit(m0: Msg) {
         var m = m0
-        if (m.kind != "text" && m.kind != "ctl" && m.media.isEmpty()) {
+        if (hasFile(m.kind) && m.media.isEmpty()) {
             // Encrypt the file with a fresh key, upload only the ciphertext.
             val enc = File(ctx.cacheDir, m.id + ".enc")
             val key = withContext(Dispatchers.IO) {
@@ -767,6 +1174,7 @@ class ChatClient(
             if (up == null) return                       // stays pending, retried at next login
             dao.setMedia(m.id, up, b64(key))
             m = m.copy(media = up, mkey = b64(key))
+            if (m.once == 1 && m.fromMe) { shredMedia(m.localPath); dao.setLocal(m.id, "") }   // view once: I keep no copy
         }
         val payload = JSONObject().put("v", 1).put("k", m.kind).put("b", m.body)
         if (m.kind == "ctl") {
@@ -776,8 +1184,11 @@ class ChatClient(
                 payload.put("rt", m.replyId).put("rq", m.quote).put("rb", m.quoteBy)
             if (m.fwd) payload.put("fw", 1)
             if (m.mentions.isNotEmpty()) payload.put("mn", org.json.JSONArray(m.mentions))
+            if (m.preview.isNotEmpty()) payload.put("lp", JSONObject(m.preview))
+            if (m.once == 1) payload.put("vo", 1)
+            if (m.expiresAt > 0) payload.put("ex", ((m.expiresAt - m.ts) / 1000).coerceAtLeast(1))
         }
-        if (m.kind != "text" && m.kind != "ctl") {
+        if (hasFile(m.kind)) {
             payload.put("mid", m.media).put("mk", m.mkey).put("fn", m.fname)
                 .put("mt", m.mime).put("sz", m.size).put("du", m.dur)
         }
@@ -850,8 +1261,10 @@ class ChatClient(
                 val out = File(mediaDir, m.id + if (ext.isEmpty()) "" else ".$ext")
                 val plain = File(media.tmpDir, m.id + ".dl")
                 try {
-                    if (MediaCrypto.decrypt(enc, plain, unb64(m.mkey)) && media.store(plain, out))
-                        dao.setLocal(m.id, out.absolutePath)
+                    if (MediaCrypto.decrypt(enc, plain, unb64(m.mkey))) {
+                        if (m.kind == "video") makeVideoThumb(plain, File(out.absolutePath + ".thumb"))
+                        if (media.store(plain, out)) dao.setLocal(m.id, out.absolutePath)
+                    }
                 } finally { media.shred(plain) }
             } catch (_: Exception) {
             } finally {
@@ -860,38 +1273,71 @@ class ChatClient(
         }
     }
 
-    fun sendMedia(chat: String, uri: Uri, kind: String) {
+    /** One photo or file to send: [rotation] in degrees (0/90/180/270), [aspect] width/height for a centre crop (0 = keep). */
+    class OutMedia(val uri: Uri, val caption: String = "", val rotation: Int = 0, val aspect: Float = 0f, val once: Boolean = false)
+
+    fun sendMedia(chat: String, uri: Uri, kind: String, caption: String = "", rotation: Int = 0, aspect: Float = 0f) {
+        bg.launch { sendMediaNow(chat, uri, kind, caption, rotation, aspect) }
+    }
+
+    /** Several photos / videos from the preview screen, one message each, in order. */
+    fun sendMediaBatch(chat: String, items: List<OutMedia>) {
         bg.launch {
-            val (name, size) = queryMeta(uri)
-            if (size > maxUpload - 1024) { events.emit(AuthEvent.Error("too_large")); return@launch }
-            val id = UUID.randomUUID().toString()
-            val ext = name.substringAfterLast('.', "").take(8)
-            val out = File(mediaDir, id + if (kind == "image") ".jpg" else if (ext.isEmpty()) "" else ".$ext")
-            val plain = File(media.tmpDir, "$id.in")     // plaintext only until stored below
-            val mime: String
-            val fname: String
-            if (kind == "image") {
-                if (!prepareImage(uri, plain)) { media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return@launch }
-                mime = "image/jpeg"; fname = "photo.jpg"
-            } else {
-                val ok = ctx.contentResolver.openInputStream(uri)?.use { i ->
-                    plain.outputStream().use { o -> i.copyTo(o) }; true
-                } ?: false
-                if (!ok) { media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return@launch }
-                mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
-                fname = name
+            for (it in items) {
+                val video = (ctx.contentResolver.getType(it.uri) ?: "").startsWith("video/")
+                sendMediaNow(chat, it.uri, if (video) "video" else "image", it.caption, it.rotation, it.aspect, it.once && !isGroup(chat))
             }
-            val plainSize = plain.length()
-            if (plainSize > maxUpload - 1024) {
-                media.shred(plain); events.emit(AuthEvent.Error("too_large")); return@launch
-            }
-            if (!media.store(plain, out)) {
-                media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return@launch
-            }
-            enqueue(Msg(id = id, chat = chat, fromMe = true, body = "", ts = System.currentTimeMillis(),
-                status = St.PENDING, seen = true, kind = kind, fname = fname, mime = mime,
-                size = plainSize, localPath = out.absolutePath))
         }
+    }
+
+    private suspend fun sendMediaNow(chat: String, uri: Uri, kind: String, caption: String, rotation: Int, aspect: Float, once: Boolean = false) {
+        val (name, size) = queryMeta(uri)
+        if (size > maxUpload - 1024) { events.emit(AuthEvent.Error("too_large")); return }
+        val id = UUID.randomUUID().toString()
+        val ext = name.substringAfterLast('.', "").take(8)
+        val out = File(mediaDir, id + if (kind == "image") ".jpg" else if (ext.isEmpty()) "" else ".$ext")
+        val plain = File(media.tmpDir, "$id.in")     // plaintext only until stored below
+        val mime: String
+        val fname: String
+        if (kind == "image") {
+            if (!prepareImage(uri, plain, rotation, aspect)) { media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return }
+            mime = "image/jpeg"; fname = "photo.jpg"
+        } else {
+            val ok = ctx.contentResolver.openInputStream(uri)?.use { i ->
+                plain.outputStream().use { o -> i.copyTo(o) }; true
+            } ?: false
+            if (!ok) { media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return }
+            mime = ctx.contentResolver.getType(uri) ?: if (kind == "video") "video/mp4" else "application/octet-stream"
+            fname = name
+        }
+        val plainSize = plain.length()
+        if (plainSize > maxUpload - 1024) {
+            media.shred(plain); events.emit(AuthEvent.Error("too_large")); return
+        }
+        if (kind == "video") makeVideoThumb(plain, File(out.absolutePath + ".thumb"))
+        if (!media.store(plain, out)) {
+            media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return
+        }
+        enqueue(Msg(id = id, chat = chat, fromMe = true, body = caption.trim().take(1000), ts = System.currentTimeMillis(),
+            status = St.PENDING, seen = true, kind = kind, fname = fname, mime = mime,
+            size = plainSize, localPath = out.absolutePath, once = if (once) 1 else 0))
+    }
+
+    /** First frame of a video as a small picture, stored (vault-encrypted) next to the video as "<file>.thumb". */
+    private fun makeVideoThumb(plainVideo: File, out: File) {
+        val tmp = File(media.tmpDir, out.name + ".jpg")
+        try {
+            val r = android.media.MediaMetadataRetriever()
+            try {
+                r.setDataSource(plainVideo.absolutePath)
+                val f = r.getFrameAtTime(0) ?: return
+                val sc = 480f / maxOf(f.width, f.height)
+                val b = if (sc < 1f) Bitmap.createScaledBitmap(f, (f.width * sc).toInt(), (f.height * sc).toInt(), true) else f
+                tmp.outputStream().use { b.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+                media.store(tmp, out)
+            } finally { r.release() }
+        } catch (_: Exception) {
+        } finally { media.shred(tmp) }
     }
 
     fun sendVoice(chat: String, file: File, durMs: Int) {
@@ -907,7 +1353,15 @@ class ChatClient(
         }
     }
 
-    private suspend fun enqueue(m: Msg) {
+    /** A message in a chat with a disappearing-messages timer gets its end time. */
+    private suspend fun stamp(m: Msg): Msg {
+        if (m.kind == "ctl" || m.kind == "info" || m.kind == "call" || m.expiresAt != 0L) return m
+        val sec = dao.chatState(m.chat)?.disappear ?: 0L
+        return if (sec > 0) m.copy(expiresAt = m.ts + sec * 1000) else m
+    }
+
+    private suspend fun enqueue(m0: Msg) {
+        val m = stamp(m0)
         dao.insert(m)
         serial.launch { unarchive(m.chat); if (m.kind != "ctl") shareProfileKey(m.chat) }
         serial.launch { if (state.value == Conn.Online) transmit(m) }
@@ -929,7 +1383,7 @@ class ChatClient(
     }
 
     /** Shrinks to max ~2400px, fixes rotation, saves as JPEG q80 (saves a lot of data). */
-    private fun prepareImage(uri: Uri, out: File): Boolean {
+    private fun prepareImage(uri: Uri, out: File, rotation: Int = 0, aspect: Float = 0f): Boolean {
         return try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
@@ -950,7 +1404,20 @@ class ChatClient(
             val fixed = if (deg != 0f)
                 Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(deg) }, true)
             else bmp
-            out.outputStream().use { fixed.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+            val turned = if (rotation % 360 != 0)
+                Bitmap.createBitmap(fixed, 0, 0, fixed.width, fixed.height, Matrix().apply { postRotate(rotation.toFloat()) }, true)
+            else fixed
+            val cropped = if (aspect > 0f) {                      // centre crop to width/height = aspect
+                val cur = turned.width.toFloat() / turned.height
+                if (cur > aspect) {
+                    val w = (turned.height * aspect).toInt().coerceAtLeast(1)
+                    Bitmap.createBitmap(turned, (turned.width - w) / 2, 0, w, turned.height)
+                } else {
+                    val h = (turned.width / aspect).toInt().coerceAtLeast(1)
+                    Bitmap.createBitmap(turned, 0, (turned.height - h) / 2, turned.width, h)
+                }
+            } else turned
+            out.outputStream().use { cropped.compress(Bitmap.CompressFormat.JPEG, 80, it) }
             true
         } catch (e: Exception) { false }
     }
@@ -1101,7 +1568,7 @@ class ChatClient(
         val chat = group ?: from
         val isOpen = openChat.value == chat
         val name = o.optString("name")
-        if (name.isNotEmpty()) dao.upsertContact(Contact(from, name))
+        if (name.isNotEmpty() && dao.isLocal(from) == 0) dao.upsertContact(Contact(from, name))
 
         if (dao.countById(id) > 0) {                 // re-delivery of something we already hold
             ackMsg(id, from, group, false); return
@@ -1128,7 +1595,7 @@ class ChatClient(
             ackMsg(id, from, group, false)
             return
         }
-        val kind = p.optString("k", "text").let { if (it in setOf("text", "image", "audio", "file")) it else "file" }
+        val kind = p.optString("k", "text").let { if (it in setOf("text", "image", "video", "audio", "file", "sticker", "location", "contact")) it else "file" }
         val body = p.optString("b")
         val fname = p.optString("fn")
         val msg = Msg(id = id, chat = chat, fromMe = false, body = body, ts = o.getLong("ts"),
@@ -1137,10 +1604,13 @@ class ChatClient(
             size = p.optLong("sz"), dur = p.optInt("du"), mkey = p.optString("mk"),
             mentions = p.optJSONArray("mn")?.toString()?.takeIf { it.length <= 2000 } ?: "",
             replyId = p.optString("rt").take(64), quote = p.optString("rq").take(200),
-            quoteBy = p.optString("rb").take(32), fwd = p.optInt("fw") == 1)
+            quoteBy = p.optString("rb").take(32), fwd = p.optInt("fw") == 1,
+            preview = cleanPreview(p.optJSONObject("lp")),
+            once = if (p.optInt("vo") == 1 && group == null && (kind == "image" || kind == "video")) 1 else 0,
+            expiresAt = p.optLong("ex").takeIf { it in 1..7_776_000L }?.let { o.getLong("ts") + it * 1000 } ?: 0L)
         val rowId = dao.insert(msg)
         if (rowId != -1L) {
-            if (kind == "image" || kind == "audio") fetch(msg)
+            if (kind == "image" || kind == "audio" || kind == "sticker") fetch(msg)
             // An archived chat returns to the list on a new message, unless it is muted.
             dao.chatState(chat)?.let { if (it.archived && !it.muted()) dao.putState(it.copy(archived = false)) }
             if (!isOpen) {
@@ -1159,7 +1629,7 @@ class ChatClient(
     }
 
     private fun wsSend(o: JSONObject) {
-        ws?.send(o.toString())
+        ws?.let { sendFrame(it, o) }
     }
 
     // ---- incoming frames ----
@@ -1182,6 +1652,8 @@ class ChatClient(
                 events.emit(AuthEvent.LoggedIn)
                 if (!crypto().hasIdentity()) uploadKeys()        // first login, or local data was reset
                 if (prefs.profileKey != null && prefs.profileDirty) publishProfile()
+                expireStatuses()
+                if (hasContactsPermission() && System.currentTimeMillis() - prefs.lastContactSync > 12 * 3600_000L) syncContacts()
                 dao.unsent().forEach { transmit(it) }
                 PushService.ensure(ctx)            // keep the own push channel up
                 watching?.let { wsSend(js("type" to "watch", "phone" to it)) }     // after a reconnect
@@ -1212,6 +1684,9 @@ class ChatClient(
                 dao.deleteBlockedExcept(list)
             }
             "reported" -> events.emit(AuthEvent.Error("reported"))     // shown as a "Report sent" toast
+            "pin_needed" -> { authBusy = false; events.emit(AuthEvent.PinNeeded) }
+            "pin_state" -> { prefs.pinOn = o.optBoolean("on"); pinOnFlow.value = prefs.pinOn }
+            "contacts_found" -> onContactsFound(o)
             "invite" -> invites.update { it + (o.getString("group") to o.getString("code")) }
             "me" -> prefs.name = o.getString("name")
             "profile_saved" -> prefs.profileDirty = false
@@ -1235,7 +1710,7 @@ class ChatClient(
                     val m = members.getJSONObject(i)
                     phones.add(m.getString("phone"))
                     nameOf[m.getString("phone")] = m.optString("name")
-                    dao.upsertContact(Contact(m.getString("phone"), m.optString("name")))
+                    m.getString("phone").let { p -> if (dao.isLocal(p) == 0) dao.upsertContact(Contact(p, m.optString("name"))) }
                 }
                 // Tell the chat who joined or left.
                 val me = prefs.phone
@@ -1286,7 +1761,7 @@ class ChatClient(
                 val phone = o.getString("phone")
                 val exists = o.getBoolean("exists")
                 val name = if (exists) o.getString("name") else null
-                if (name != null) dao.upsertContact(Contact(phone, name))
+                if (name != null && dao.isLocal(phone) == 0) dao.upsertContact(Contact(phone, name))
                 events.emit(AuthEvent.Profile(phone, name, exists))
             }
             "status" -> {

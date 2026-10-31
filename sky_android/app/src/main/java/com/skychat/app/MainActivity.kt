@@ -39,7 +39,15 @@ class MainActivity : ComponentActivity() {
         val app = application as SkyApp
         openRequest.value = intent.getStringExtra("chat")
         joinFrom(intent)
-        setContent { SkyTheme { AppNav(app, openRequest) } }
+        setContent {
+            val secure by app.secure.collectAsState()
+            LaunchedEffect(secure) {
+                if (secure) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+            }
+            val mode by app.themeMode.collectAsState()
+            SkyTheme(mode) { AppNav(app, openRequest) }
+        }
 
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -56,15 +64,19 @@ class MainActivity : ComponentActivity() {
     /** skychat://join/CODE: ask to join once the connection is up. */
     private fun joinFrom(intent: Intent?) {
         val uri = intent?.data ?: return
-        if (uri.scheme != "skychat" || uri.host != "join") return
-        val code = uri.lastPathSegment ?: return
-        (application as SkyApp).client.joinWhenOnline(code)
+        if (uri.scheme != "skychat") return
+        val last = uri.lastPathSegment ?: return
+        when (uri.host) {
+            "join" -> (application as SkyApp).client.joinWhenOnline(last)
+            "user" -> if (Regex("\\+[0-9]{8,15}").matches(last)) openRequest.value = last    // a QR code opened by another app
+        }
     }
 
     override fun onStart() {
         super.onStart()
         val app = application as SkyApp
         app.client.foreground = true
+        app.maybeLock()
         if (app.prefs.token != null) {
             app.client.start()
             PushService.ensure(this)          // the app is visible, so Android allows starting it
@@ -88,6 +100,7 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         val app = application as SkyApp
         app.client.foreground = false
+        app.lastStop = System.currentTimeMillis()
         app.client.scheduleIdleStop()
     }
 }
@@ -98,9 +111,11 @@ private fun chatRoute(id: String) =
 @Composable
 fun AppNav(app: SkyApp, openRequest: MutableStateFlow<String?>) {
     val nav = rememberNavController()
+    SideEffect { ChatNav.open = { id -> nav.navigate(chatRoute(id)) } }
     val loggedIn by app.client.loggedIn.collectAsState()
     val request by openRequest.collectAsState()
     val call by app.calls.ui.collectAsState()
+    val gcall by app.client.groupCalls!!.ui.collectAsState()
     val activity = LocalContext.current as? Activity
 
     LaunchedEffect(loggedIn) {
@@ -133,7 +148,16 @@ fun AppNav(app: SkyApp, openRequest: MutableStateFlow<String?>) {
                 LoginScreen(app) { nav.navigate("chats") { popUpTo("login") { inclusive = true } } }
             }
             composable("chats") {
-                ChatListScreen(app, onStarred = { nav.navigate("starred") }, onProfile = { nav.navigate("profile") }) { id -> nav.navigate(chatRoute(id)) }
+                ChatListScreen(app, onStarred = { nav.navigate("starred") }, onProfile = { nav.navigate("profile") }, onSettings = { nav.navigate("settings") }, onQr = { nav.navigate("qr") }) { id -> nav.navigate(chatRoute(id)) }
+            }
+            composable("settings") {
+                SettingsScreen(app, onBack = { nav.popBackStack() }, onProfile = { nav.navigate("profile") },
+                    onStarred = { nav.navigate("starred") }, onQr = { nav.navigate("qr") })
+            }
+            composable("qr") {
+                QrScreen(app, onBack = { nav.popBackStack() }) { id ->
+                    nav.navigate(chatRoute(id)) { popUpTo("qr") { inclusive = true } }
+                }
             }
             composable("profile") {
                 ProfileScreen(app, onBack = { nav.popBackStack() })
@@ -141,12 +165,20 @@ fun AppNav(app: SkyApp, openRequest: MutableStateFlow<String?>) {
             composable("starred") {
                 StarredScreen(app, onBack = { nav.popBackStack() }) { id -> nav.navigate(chatRoute(id)) }
             }
+            composable("media/{phone}") { e ->
+                val arg = e.arguments!!.getString("phone")!!
+                val chat = if (arg.startsWith("p")) "+" + arg.drop(1) else arg.drop(1)
+                MediaScreen(app, chat) { nav.popBackStack() }
+            }
             composable("chat/{phone}") { e ->
                 val arg = e.arguments!!.getString("phone")!!
                 val chat = if (arg.startsWith("p")) "+" + arg.drop(1) else arg.drop(1)
-                ChatScreen(app, chat) { nav.popBackStack() }
+                ChatScreen(app, chat, onMedia = { nav.navigate("media/" + chatRoute(chat).removePrefix("chat/")) }) { nav.popBackStack() }
             }
         }
+        val locked by app.locked.collectAsState()
+        if (locked) LockScreen(app)
         if (call.phase != Phase.IDLE) CallScreen(app, call)
+        if (gcall.phase != com.skychat.app.call.GPhase.IDLE) GroupCallScreen(app, gcall)
     }
 }

@@ -6,12 +6,15 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import com.skychat.app.data.ChatState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Person
@@ -53,6 +56,10 @@ fun toastText(code: String) = when (code) {
     "not_owner", "not_admin" -> "Only group admins can do that"
     "admins_only" -> "Only admins can send messages in this group"
     "bad_invite" -> "This invite link is not valid any more"
+    "call_busy" -> "You are already in a call"
+    "bad_pin" -> "Wrong PIN"
+    "pin_locked" -> "Too many wrong tries. Try again in 15 minutes."
+    "bad_pin_format" -> "The PIN must be 6 digits"
     "group_full" -> "A group can have at most 50 members"
     "unknown_recipient" -> "That number is not registered on Sky"
     "too_large" -> "File is larger than 25 MB"
@@ -74,7 +81,7 @@ fun toastText(code: String) = when (code) {
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, onOpen: (String) -> Unit) {
+fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, onSettings: () -> Unit, onQr: () -> Unit, onOpen: (String) -> Unit) {
     val dao = app.db.dao()
     val chats by dao.lastMessages().collectAsState(initial = emptyList())
     val unread by dao.unread().collectAsState(initial = emptyList())
@@ -90,6 +97,9 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
     val peerProfiles by dao.peerProfiles().collectAsState(initial = emptyList())
     val blockedList by dao.blockedPhones().collectAsState(initial = emptyList())
     var archivedView by remember { mutableStateOf(false) }
+    var tab by remember { mutableIntStateOf(0) }             // 0 Chats, 1 Calls
+    var filter by remember { mutableIntStateOf(0) }          // 0 All, 1 Unread, 2 Groups
+    val calls by dao.callLog().collectAsState(initial = emptyList())
     var actionChat by remember { mutableStateOf<ChatItem?>(null) }   // long-pressed row
     var chatDlg by remember { mutableIntStateOf(0) }                 // 1 mute, 2 block, 3 report
     BackHandler(enabled = archivedView && !searching) { archivedView = false }
@@ -148,7 +158,11 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
     val hits by produceState(emptyList<com.skychat.app.data.Msg>(), q) {
         value = if (q.length < 2) emptyList() else withContext(kotlinx.coroutines.Dispatchers.IO) { dao.search(likePattern(q)) }
     }
-    val shown: List<ChatItem> = if (!searching || q.isEmpty()) (if (archivedView) archivedList else mainList) else {
+    val shown: List<ChatItem> = if (!searching || q.isEmpty()) (if (archivedView) archivedList else when (filter) {
+        1 -> mainList.filter { it.unread > 0 || it.markedUnread }
+        2 -> mainList.filter { isGroup(it.id) }
+        else -> mainList
+    }) else {
         items.filter { it.title.contains(q, ignoreCase = true) || it.id.contains(q) } +
         hits.map { m ->
             val who = when {
@@ -205,8 +219,12 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
                             Text("⋮", color = Color.White, fontSize = 20.sp)
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(text = { Text("Settings") },
+                                onClick = { menuOpen = false; onSettings() })
+                            DropdownMenuItem(text = { Text("Server address (dev)") },
+                                onClick = { menuOpen = false; dialog = 6 })
                             DropdownMenuItem(text = { Text("Join group by link") },
-                                onClick = { menuOpen = false; dialog = 3 })
+                                onClick = { menuOpen = false; dialog = 5 })
                             DropdownMenuItem(text = { Text("Profile") },
                                 onClick = { menuOpen = false; onProfile() })
                             DropdownMenuItem(text = { Text("Starred messages") },
@@ -219,24 +237,70 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = BarGreen, titleContentColor = Color.White)
+                    containerColor = Sky.bar, titleContentColor = Color.White)
             )
         },
+        bottomBar = {
+            if (!searching) NavigationBar(containerColor = Sky.surface) {
+                NavigationBarItem(selected = tab == 0, onClick = { tab = 0 },
+                    icon = { BadgedBox(badge = { if (items.any { it.unread > 0 }) Badge { Text("${items.count { it.unread > 0 }}") } }) { Text("💬", fontSize = 20.sp) } },
+                    label = { Text("Chats") })
+                NavigationBarItem(selected = tab == 1, onClick = { tab = 1; archivedView = false },
+                    icon = { Text("◎", fontSize = 22.sp) }, label = { Text("Updates") })
+                NavigationBarItem(selected = tab == 2, onClick = { tab = 2; archivedView = false },
+                    icon = { Text("📞", fontSize = 20.sp) }, label = { Text("Calls") })
+            }
+        },
         floatingActionButton = {
-            FloatingActionButton(onClick = { dialog = 1 },
+            if (tab == 0) FloatingActionButton(onClick = { dialog = 1 },
                 containerColor = Accent, contentColor = Color.White) {
                 Icon(Icons.Filled.Add, contentDescription = "New chat")
             }
         }
     ) { pad ->
+        Column(Modifier.padding(pad)) {
+        if (tab == 0 && !searching && !archivedView) {
+            Surface(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).clickable { searching = true },
+                shape = RoundedCornerShape(24.dp), color = Sky.pill) {
+                Text("🔍  Search chats and messages", Modifier.padding(horizontal = 16.dp, vertical = 12.dp), color = Color.Gray)
+            }
+            Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("All", "Unread", "Groups").forEachIndexed { i, label ->
+                    FilterChip(selected = filter == i, onClick = { filter = i }, label = { Text(label) })
+                }
+            }
+        }
+        Box(Modifier.weight(1f)) {
+        if (tab == 1) UpdatesTab(app, { titleOf(it) }, photoOf)
+        else if (tab == 2) {
+            if (calls.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No calls yet.", color = Color.Gray)
+            } else LazyColumn(Modifier.fillMaxSize()) {
+                items(calls, key = { it.id }) { m ->
+                    val missed = m.body.endsWith("Missed")
+                    Row(Modifier.fillMaxWidth().clickable { onOpen(m.chat) }.padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Avatar(app, photoOf[m.chat] ?: "", 48.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(titleOf(m.chat), fontWeight = FontWeight.Medium, maxLines = 1,
+                                color = if (missed) Color(0xFFD32F2F) else Color.Unspecified)
+                            Text(m.body, color = Color.Gray, fontSize = 14.sp, maxLines = 1)
+                        }
+                        Text(timeText(m.ts), fontSize = 12.sp, color = Color.Gray)
+                    }
+                    HorizontalDivider(Modifier.padding(start = 76.dp), color = Sky.divider)
+                }
+            }
+        } else
         if (shown.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(if (searching && q.isNotEmpty()) (if (q.length < 2) "Type at least 2 letters" else "Nothing found")
                      else if (archivedView) "No archived chats."
                      else "No chats yet. Tap + to start one.", color = Color.Gray)
             }
         } else {
-            LazyColumn(Modifier.padding(pad)) {
+            LazyColumn(Modifier.fillMaxSize()) {
                 if (!archivedView && !searching && archivedCount > 0) item(key = "archived-row") {
                     Row(Modifier.fillMaxWidth().clickable { archivedView = true }
                         .padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -245,13 +309,15 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
                         Text("Archived", Modifier.weight(1f), fontWeight = FontWeight.Medium)
                         Text("$archivedCount", color = Color.Gray)
                     }
-                    HorizontalDivider(Modifier.padding(start = 76.dp), color = Color(0x14000000))
+                    HorizontalDivider(Modifier.padding(start = 76.dp), color = Sky.divider)
                 }
                 items(shown, key = { it.key }) { c ->
                     ChatRow(app, c, onLongClick = { if (c.key == c.id) actionChat = c }) { onOpen(c.id) }
-                    HorizontalDivider(Modifier.padding(start = 76.dp), color = Color(0x14000000))
+                    HorizontalDivider(Modifier.padding(start = 76.dp), color = Sky.divider)
                 }
             }
+        }
+        }
         }
     }
 
@@ -299,10 +365,41 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
 
     if (dialog == 1) {
         var phone by remember { mutableStateOf("+880") }
+        val people by dao.localContacts().collectAsState(initial = emptyList())
+        val askContacts = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+            if (ok) app.client.syncContacts()
+            else Toast.makeText(ctx, "Allow contacts to find your friends on Sky", Toast.LENGTH_SHORT).show()
+        }
         AlertDialog(
             onDismissRequest = { dialog = 0 },
             title = { Text("New chat") },
-            text = { OutlinedTextField(phone, { phone = it }, singleLine = true, label = { Text("Phone number") }) },
+            text = {
+                Column {
+                    OutlinedTextField(phone, { phone = it }, singleLine = true, label = { Text("Phone number") })
+                    Row {
+                        TextButton(onClick = {
+                            if (app.client.hasContactsPermission()) app.client.syncContacts()
+                            else askContacts.launch(android.Manifest.permission.READ_CONTACTS)
+                        }) { Text("Find friends") }
+                        TextButton(onClick = { dialog = 0; onQr() }) { Text("QR code") }
+                    }
+                    if (people.isEmpty()) Text("Friends from your contacts who use Sky will appear here.",
+                        fontSize = 12.sp, color = Color.Gray)
+                    else LazyColumn(Modifier.heightIn(max = 260.dp)) {
+                        items(people, key = { it.phone }) { c ->
+                            Row(Modifier.fillMaxWidth().clickable { dialog = 0; onOpen(c.phone) }.padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Avatar(app, photoOf[c.phone] ?: "", 36.dp)
+                                Spacer(Modifier.width(10.dp))
+                                Column {
+                                    Text(c.name, maxLines = 1)
+                                    Text(c.phone, fontSize = 12.sp, color = Color.Gray)
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(
                     enabled = phone.startsWith("+") && phone.length >= 8,
@@ -313,33 +410,7 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
         )
     }
 
-    if (dialog == 4) {
-        var presence by remember { mutableStateOf(app.prefs.sharePresence) }
-        var typingOn by remember { mutableStateOf(app.prefs.shareTyping) }
-        AlertDialog(
-            onDismissRequest = { dialog = 0 },
-            title = { Text("Privacy") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Online status and last seen")
-                            Text("If you turn this off, you won't see other people's either.", fontSize = 12.sp, color = Color.Gray)
-                        }
-                        Switch(presence, { presence = it; app.client.setSharePresence(it) })
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Typing indicator")
-                            Text("Show \"typing…\" to the other person while you write.", fontSize = 12.sp, color = Color.Gray)
-                        }
-                        Switch(typingOn, { typingOn = it; app.prefs.shareTyping = it })
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { dialog = 0 }) { Text("Done") } }
-        )
-    }
+    if (dialog == 4) PrivacyDialog(app) { dialog = 0 }
 
     if (dialog == 3) {
         AlertDialog(
@@ -353,7 +424,23 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
         )
     }
 
-    if (dialog == 3) {
+    if (dialog == 6) {
+        var url by remember { mutableStateOf(app.prefs.serverUrl) }
+        AlertDialog(
+            onDismissRequest = { dialog = 0 },
+            title = { Text("Server address (dev)") },
+            text = {
+                Column {
+                    OutlinedTextField(url, { url = it }, singleLine = true, label = { Text("wss://chat.example.com/ws") })
+                    ServerNote(url)
+                }
+            },
+            confirmButton = { TextButton(enabled = serverProblem(url) == null, onClick = { app.client.changeServer(url); dialog = 0 }) { Text("Save") } },
+            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text("Cancel") } }
+        )
+    }
+
+    if (dialog == 5) {
         var link by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { dialog = 0 },

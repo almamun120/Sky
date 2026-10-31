@@ -1,11 +1,23 @@
-# TLS in front of the Erlang server. Caddy gets a free certificate automatically.
-# Replace the domain with yours; clients then use wss://chat.example.com/ws
-# (the app derives the push channel wss://chat.example.com/push and the
-# upload/download URLs from the same address).
-chat.example.com {
-    # /ws and /push are WebSockets, /upload and /media/* are plain HTTP; Caddy handles all of them.
-    reverse_proxy localhost:8080 {
-        # push connections are long-lived; do not cut them when the config reloads
+# TLS in front of the Erlang server. Caddy gets and renews a free certificate by itself.
+# The app talks to  wss://YOUR-DOMAIN/ws  and derives everything else from that address:
+#   /ws        the chat connection (WebSocket)
+#   /push      the wake-up channel (WebSocket)
+#   /upload    encrypted file upload (HTTPS)
+#   /media/*   encrypted file download (HTTPS)
+# One reverse_proxy line carries all four; Caddy upgrades the WebSocket connections on its own.
+#
+# Start:  SKY_DOMAIN=chat.mydomain.com caddy run --config Caddyfile
+# (or replace the placeholder below with your domain; the part after ":" is the default)
+{$SKY_DOMAIN:chat.example.com} {
+    # The server accepts uploads up to 25 MB; stop anything bigger before it reaches Erlang.
+    request_body {
+        max_size 26MB
+    }
+
+    header Strict-Transport-Security "max-age=31536000"
+
+    reverse_proxy 127.0.0.1:8080 {
+        # /ws and /push are long-lived: do not cut them when the Caddy config is reloaded
         stream_close_delay 5m
     }
 }
