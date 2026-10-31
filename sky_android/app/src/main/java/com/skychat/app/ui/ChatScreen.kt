@@ -145,11 +145,11 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
             if (provider == null) { Toast.makeText(ctx, "Turn on location on your phone", Toast.LENGTH_SHORT).show(); return }
             Toast.makeText(ctx, "Finding your location…", Toast.LENGTH_SHORT).show()
             @Suppress("MissingPermission")
-            androidx.core.location.LocationManagerCompat.getCurrentLocation(lm, provider, null, androidx.core.content.ContextCompat.getMainExecutor(ctx)) { loc ->
+            androidx.core.location.LocationManagerCompat.getCurrentLocation(lm, provider, null, androidx.core.content.ContextCompat.getMainExecutor(ctx), androidx.core.util.Consumer<android.location.Location?> { loc ->
                 @Suppress("MissingPermission")
                 val l = loc ?: try { lm.getLastKnownLocation(provider) } catch (_: SecurityException) { null }
                 if (l != null) locationFound = l else Toast.makeText(ctx, "Could not find your location", Toast.LENGTH_SHORT).show()
-            }
+            })
         } catch (_: SecurityException) { }
     }
     val locPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
