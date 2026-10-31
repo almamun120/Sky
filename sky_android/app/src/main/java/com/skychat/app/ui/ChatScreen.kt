@@ -144,12 +144,31 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                 .firstOrNull { lm.isProviderEnabled(it) }
             if (provider == null) { Toast.makeText(ctx, "Turn on location on your phone", Toast.LENGTH_SHORT).show(); return }
             Toast.makeText(ctx, "Finding your location…", Toast.LENGTH_SHORT).show()
+            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            var done = false
+            val listener = object : android.location.LocationListener {
+                override fun onLocationChanged(loc: android.location.Location) {
+                    if (done) return
+                    done = true
+                    handler.removeCallbacksAndMessages(null)
+                    try { lm.removeUpdates(this) } catch (_: SecurityException) { }
+                    locationFound = loc
+                }
+                override fun onProviderEnabled(p: String) {}
+                override fun onProviderDisabled(p: String) {}
+                @Deprecated("Needed below API 29")
+                override fun onStatusChanged(p: String?, status: Int, extras: android.os.Bundle?) {}
+            }
             @Suppress("MissingPermission")
-            androidx.core.location.LocationManagerCompat.getCurrentLocation(lm, provider, null, androidx.core.content.ContextCompat.getMainExecutor(ctx), androidx.core.util.Consumer<android.location.Location?> { loc ->
+            lm.requestLocationUpdates(provider, 0L, 0f, listener, android.os.Looper.getMainLooper())
+            handler.postDelayed({
+                if (done) return@postDelayed
+                done = true
+                try { lm.removeUpdates(listener) } catch (_: SecurityException) { }
                 @Suppress("MissingPermission")
-                val l = loc ?: try { lm.getLastKnownLocation(provider) } catch (_: SecurityException) { null }
+                val l = try { lm.getLastKnownLocation(provider) } catch (_: SecurityException) { null }
                 if (l != null) locationFound = l else Toast.makeText(ctx, "Could not find your location", Toast.LENGTH_SHORT).show()
-            })
+            }, 10_000L)
         } catch (_: SecurityException) { }
     }
     val locPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
