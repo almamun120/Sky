@@ -22,12 +22,15 @@
     <application
         android:name=".SkyApp"
         android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.Sky"
         android:allowBackup="false"
         android:usesCleartextTraffic="${cleartext}">
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:theme="@style/Theme.Sky.Starting"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

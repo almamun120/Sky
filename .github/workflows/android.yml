@@ -1,7 +1,7 @@
 # Builds the Android app (folder sky_android).
 #  - every push and pull request: debug APK
 #  - a tag like v0.11.0: signed release APK + AAB, attached to a GitHub Release
-#  - Actions -> Android -> Run workflow (manual): signed release APK + AAB as an artifact (no tag needed)
+#  - every push to main and manual run: signed release APK + AAB as an artifact (no tag needed)
 #    Without the signing secrets a temporary key is made: installable, but NOT usable for updates.
 name: Android
 
@@ -38,7 +38,7 @@ jobs:
           path: sky_android/app/build/outputs/apk/debug/*.apk
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     needs: debug
     runs-on: ubuntu-latest
     steps:

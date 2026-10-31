@@ -14,6 +14,9 @@ android {
         targetSdk = 35
         versionCode = 22
         versionName = "0.22.0"
+        // Only real phones (arm). Each extra CPU type adds ~100 MB of native code (WebRTC, libsignal, SQLCipher).
+        // For an x86_64 emulator on a PC add "x86_64" here.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
     // Signing comes from environment variables (set by the GitHub workflow); without them the release APK is unsigned.
     val keystore: String? = System.getenv("SKY_KEYSTORE_FILE")
@@ -46,6 +49,7 @@ android {
     }
     packaging {
         resources { excludes += setOf("libsignal_jni*.dylib", "signal_jni*.dll") }
+        jniLibs { useLegacyPackaging = true }   // compress native libraries: much smaller APK
     }
     buildFeatures { compose = true }
     lint { checkReleaseBuilds = false; abortOnError = false }
@@ -54,6 +58,7 @@ android {
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.10.01"))
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("io.github.webrtc-sdk:android:125.6422.07")
     implementation("org.signal:libsignal-android:0.94.4")
     implementation("org.signal:libsignal-client:0.94.4")
