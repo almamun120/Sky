@@ -28,14 +28,14 @@ fun StarredScreen(app: SkyApp, onBack: () -> Unit, onOpen: (String) -> Unit) {
     val groups by dao.groups().collectAsState(initial = emptyList())
     val names = contacts.associate { it.phone to it.name }
     val gnames = groups.associate { it.gid to it.name }
-    fun titleOf(chat: String) = if (isGroup(chat)) gnames[chat] ?: "Group" else names[chat] ?: chat
+    fun titleOf(chat: String) = if (isGroup(chat)) gnames[chat] ?: t("Group") else names[chat] ?: chat
 
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("Starred messages") },
+            title = { Text(t("Starred messages")) },
             navigationIcon = {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("Back"), tint = Color.White)
                 }
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Sky.bar, titleContentColor = Color.White)
@@ -43,12 +43,12 @@ fun StarredScreen(app: SkyApp, onBack: () -> Unit, onOpen: (String) -> Unit) {
     }) { pad ->
         if (list.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(pad), contentAlignment = Alignment.Center) {
-                Text("No starred messages. Long-press a message and choose Star.", color = Color.Gray,
+                Text(t("No starred messages. Long-press a message and choose Star."), color = Color.Gray,
                     modifier = Modifier.padding(24.dp))
             }
         } else LazyColumn(Modifier.padding(pad)) {
             items(list, key = { it.id }) { m ->
-                val who = if (m.fromMe) "You" else names[m.sender] ?: m.sender.ifEmpty { titleOf(m.chat) }
+                val who = if (m.fromMe) t("You") else names[m.sender] ?: m.sender.ifEmpty { titleOf(m.chat) }
                 Row(Modifier.fillMaxWidth().clickable { onOpen(m.chat) }.padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {

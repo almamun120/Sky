@@ -53,8 +53,8 @@ fun QrScreen(app: SkyApp, onBack: () -> Unit, onOpenChat: (String) -> Unit) {
         val text = r.contents ?: return@rememberLauncherForActivityResult
         val phone = phoneFrom(text)
         when {
-            phone == null -> Toast.makeText(ctx, "This is not a Sky QR code", Toast.LENGTH_SHORT).show()
-            phone == me -> Toast.makeText(ctx, "This is your own code", Toast.LENGTH_SHORT).show()
+            phone == null -> Toast.makeText(ctx, t("This is not a Sky QR code"), Toast.LENGTH_SHORT).show()
+            phone == me -> Toast.makeText(ctx, t("This is your own code"), Toast.LENGTH_SHORT).show()
             else -> app.client.lookup(phone)
         }
     }
@@ -73,16 +73,16 @@ fun QrScreen(app: SkyApp, onBack: () -> Unit, onOpenChat: (String) -> Unit) {
     }
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("QR code") },
-            navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") } },
+            title = { Text(t("QR code")) },
+            navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("Back")) } },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Sky.bar, titleContentColor = Color.White,
                 navigationIconContentColor = Color.White)
         )
     }) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
             TabRow(selectedTabIndex = tab) {
-                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("My code") })
-                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Scan code") })
+                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text(t("My code")) })
+                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text(t("Scan code")) })
             }
             if (tab == 0) {
                 val bmp = remember(me) { qrBitmap("skychat://user/$me") }
@@ -95,7 +95,7 @@ fun QrScreen(app: SkyApp, onBack: () -> Unit, onOpenChat: (String) -> Unit) {
                     Text(me, color = Color.Gray, fontSize = 13.sp)
                     Spacer(Modifier.height(16.dp))
                     Box(Modifier.clip(RoundedCornerShape(16.dp)).background(Color.White).padding(12.dp)) {   // white even in dark mode, so scanners can read it
-                        Image(bmp, contentDescription = "Your QR code", modifier = Modifier.size(240.dp))
+                        Image(bmp, contentDescription = t("Your QR code"), modifier = Modifier.size(240.dp))
                     }
                     Spacer(Modifier.height(16.dp))
                     Text("People who scan this code can start a chat with you. Only share it with people you trust.",
@@ -105,9 +105,9 @@ fun QrScreen(app: SkyApp, onBack: () -> Unit, onOpenChat: (String) -> Unit) {
                 LaunchedEffect(Unit) { openScanner() }
                 Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center) {
-                    Text("Point the camera at another person's Sky QR code.", textAlign = TextAlign.Center)
+                    Text(t("Point the camera at another person's Sky QR code."), textAlign = TextAlign.Center)
                     Spacer(Modifier.height(16.dp))
-                    Button(onClick = { openScanner() }) { Text("Open scanner") }
+                    Button(onClick = { openScanner() }) { Text(t("Open scanner")) }
                 }
             }
         }

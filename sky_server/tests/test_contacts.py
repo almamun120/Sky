@@ -1,6 +1,6 @@
 """Contact discovery: hashed numbers in, registered people out."""
 import asyncio, hashlib, json, random, websockets
-HOST = "ws://127.0.0.1:8080"
+HOST = "ws://127.0.0.1:4080"
 async def jrx(ws, t=3): return json.loads(await asyncio.wait_for(ws.recv(), t))
 async def until(ws, typ, t=3, **m):
     while True:

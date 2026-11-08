@@ -1,0 +1,27 @@
+# Alerts for Prometheus (load with rule_files in prometheus.yml; connect Alertmanager to get an e-mail / message).
+groups:
+  - name: sky
+    rules:
+      - alert: SkyDown
+        expr: up{job="sky"} == 0
+        for: 1m
+        annotations: {summary: "The Sky server does not answer"}
+      - alert: SkyDevModeOn
+        expr: sky_console_secrets == 1
+        for: 10m
+        annotations: {summary: "Console secrets are ON: SMS codes and PINs are written to the console (scripts/console_secrets.sh off)"}
+      - alert: SkyNoSmsGateway
+        expr: sum(sky_sms_gateway_up) == 0
+        for: 2m
+        annotations: {summary: "No SMS gateway is connected: nobody can register (scripts/sms_gateways.sh list)"}
+      - alert: SkySmsFailing
+        expr: increase(sky_sms_sent_total{result="fail"}[10m]) > 5
+        annotations: {summary: "SMS codes are failing"}
+      - alert: SkyOverloaded
+        expr: sky_beam_run_queue > 50
+        for: 5m
+        annotations: {summary: "The server has more work than it can do (run queue high)"}
+      - alert: SkyMemoryHigh
+        expr: sky_beam_memory_bytes{kind="total"} > 4e9
+        for: 10m
+        annotations: {summary: "The Erlang VM uses more than 4 GB"}

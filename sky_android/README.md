@@ -3,9 +3,9 @@
 Open this folder in Android Studio (Ladybug or newer, JDK 17). Gradle 8.9 is
 downloaded automatically from gradle-wrapper.properties.
 
-1. Start the server: `rebar3 shell` in sky_server
-2. Emulator: the default server address ws://10.0.2.2:8080/ws works as-is.
-   Real phone: use ws://<your PC's LAN IP>:8080/ws
+1. Start the server: `rebar3 shell` in sky_server (plain listener 127.0.0.1:4080; for a phone or emulator set `{listen_ip, {0,0,0,0}}` in sys.config, or put Caddy in front)
+2. Emulator: `ws://10.0.2.2:4080/ws`.
+   Real phone: `wss://your-domain/ws` (Caddy), or on your own network `ws://<your PC's LAN IP>:4080/ws`.
 3. Enter a phone number like +8801700000001, tap Send code. In dev mode the
    code is shown on screen. Use a second emulator/phone for another number.
 
@@ -63,7 +63,7 @@ sources but has not been run on a device**: test two phones (including offline d
 Firebase and google-services.json are gone; the app has no Google dependency for notifications.
 - `push/PushService.kt` is a foreground service (shown as a minimal silent "Waiting for messages" notification)
   that keeps one small WebSocket open to the server's `/push` endpoint (same host as the chat address:
-  `ws://host:8080/ws` -> `ws://host:8080/push`). When the server sends a wake, the app opens the chat connection,
+  `wss://host/ws` -> `wss://host/push`). When the server sends a wake, the app opens the chat connection,
   downloads and decrypts what is waiting, and shows the notification itself.
 - Started when you open the app while logged in, after login, after the phone reboots or Sky is updated
   (`push/BootReceiver.kt`). Stopped on log out. Reconnects by itself (2 s ... 60 s back-off, immediately when the
@@ -380,3 +380,42 @@ File: `.github/workflows/android.yml` (at the top of the repository, next to `sk
 - **Forgot the password?** Nobody can open the file, not even the developer.
 - The backup must be restored with the same app version (same database version); the app says so otherwise. No automatic daily backup (that would need Google's APIs); make one now and then and keep it on Drive or a computer.
 - No server change. Database unchanged (14). Version 0.22.0. Not compiled or run here; the password-to-key loop was checked against Python's `hashlib.pbkdf2_hmac`.
+
+## Step 29 (roadmap, the rest): language, font size, wallpaper, storage, broadcast lists
+Built on top of your build-clean copy of step 27 (your fixes, icons, splash and workflow are kept).
+- **Language** (Settings → Language): System default / English / বাংলা. The text of the screens (menus, buttons, dialogs, settings, messages shown as toasts) is translated through one table, `ui/Lang.kt`
+  (`t("English text")` → Bengali). Every English text in the screens that is in that table is shown in Bengali; **texts that are not in the table stay English** (some notices written into chats, push notifications,
+  call-screen status lines coming from the engine). To translate more: add `"English" to "বাংলা"` to the table and wrap the text in `t(...)` in the screen. The table is the only place to touch.
+- **Font size** (Settings → Font size): Small 85 %, Default, Large 115 %, Huge 130 % (on top of Android's own font size).
+- **Chat wallpaper** (Settings → Chat wallpaper): the default, six colours, or **your own picture** (kept encrypted on the phone). It shows behind the messages of every chat.
+- **Storage and data** (Settings → Storage and data): how much space photos, videos, voice notes, files and stickers use, the 8 chats that use most, and **Clear** for a chat (deletes its files from the phone; messages stay;
+  received files can be downloaded again, files you sent are gone for good).
+- **Broadcast lists** (⋮ → New broadcast): choose at least 2 people and a name. In the list a text goes to **every member as an ordinary one-to-one message** (people who blocked you or whom you blocked are skipped); the answers
+  come in the normal chats. The list screen keeps a copy of what you sent. Texts only (no pictures) and no delivery marks yet.
+- Local database version 15 (real migration). Version 0.23.0. **No server change.**
+- Already done earlier and unchanged: dark mode, Android's own notification settings, Settings screen. Not compiled or run here.
+
+
+## Version 0.23.1: SSL base, one build for debug and release (on top of step 29)
+- **Same app in debug and release.** No difference any more: the server address field is on the login screen and in Settings / ⋮ → "Server address" in both, both accept wss:// and ws://, both use MessagePack by default.
+  (Removed: the debug-only ws:// permission, `FLAG_DEBUGGABLE` checks, the `cleartext` manifest placeholder. The manifest allows cleartext in both because ws:// is the fallback.)
+- **wss:// first, ws:// only as the fallback.** An address can be typed as `chat.example.com` (becomes `wss://chat.example.com/ws`). When wss:// cannot connect at all, the app tries `ws://` on the same host (port 80, Caddy)
+  once, and goes back to wss:// at the next connection. The chat socket, uploads/downloads and the push channel each do this on their own. The orange/green note under the field tells which kind the typed address is.
+  Warning: on the fallback the session token and uploads are not protected by TLS (message and file contents stay end-to-end encrypted).
+- **Wire format:** MessagePack (binary) by default; JSON text only as the fallback (an old server, or Settings → Server address → "JSON text format (fallback)").
+- **No Google STUN.** The hard-coded `stun.l.google.com` fallback is gone: calls use the `ice` list from your own server (coturn, see the server README). With no list, calls work inside one network only.
+- Ports: the server's own listener moved from 8080 to **4080** (loopback), 8080/8443 are free for other uses; Caddy: 443 (wss) and 80 (fallback). See the server README "Ports and transport".
+- The server no longer sends the OTP to the app (it used to in dev mode): read it on the server console (switch: `scripts/console_secrets.sh on|off`, default on). The "Dev mode code" line on the login screen therefore never appears.
+- Version 0.23.1 (code 24). Local database unchanged (15). Not compiled or run here (no Android SDK, no Erlang).
+
+## Version 0.24.0: on top of 29 (0.23.1, SSL base), features from roadmap 30b
+- The app understands the server errors **`sms_failed`** ("Could not send the SMS. Try again later.") and **`registration_closed`** ("New registrations are closed right now.") (new SMS gateway and admin page on the server, see the server README). Both are also in Bengali.
+- **Language:** all English screen texts that are in the Bengali table (`ui/Lang.kt`) are now shown in Bengali (login screen, chat list, settings, chat and others were not wrapped in `t(...)` before). Texts that are not in the table stay English.
+- Everything else (wss first, ws:// fallback, address field in debug and release, MessagePack default, own STUN/TURN) is unchanged. Database version 15. Version 0.24.0 (code 25). Not compiled or run here (no Android SDK).
+
+
+## Added in this version
+- Polls (single/multiple choice, live vote counts, change/remove vote), Communities tab, group join approval (admin switch + request list), photos/videos/files in broadcasts.
+- Room database version 16 (`MIGRATION_15_16`: new group columns, `poll_vote`, `peer_dev`).
+- Bengali strings for the new screens added to `ui/Lang.kt`.
+- Multi-device is NOT included yet; nothing was compiled here, so build and test first.

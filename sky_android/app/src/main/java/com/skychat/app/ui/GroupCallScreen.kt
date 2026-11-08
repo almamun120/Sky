@@ -57,7 +57,7 @@ fun GroupCallScreen(app: SkyApp, g: GroupCallUi) {
 
     if (showRoutes) AlertDialog(
         onDismissRequest = { showRoutes = false },
-        title = { Text("Sound") },
+        title = { Text(t("Sound")) },
         text = {
             Column {
                 AudioRoute.available(ctx).forEach { r ->
@@ -66,20 +66,20 @@ fun GroupCallScreen(app: SkyApp, g: GroupCallUi) {
                 }
             }
         },
-        confirmButton = {}, dismissButton = { TextButton(onClick = { showRoutes = false }) { Text("Cancel") } }
+        confirmButton = {}, dismissButton = { TextButton(onClick = { showRoutes = false }) { Text(t("Cancel")) } }
     )
 
     val secs = if (g.startedAt > 0) ((now - g.startedAt) / 1000).toInt().coerceAtLeast(0) else 0
     val connectedCount = g.peers.count { it.connected }
     val status = when {
-        g.phase == GPhase.INCOMING -> (if (g.video) "Group video call" else "Group voice call") + " · invitation"
-        connectedCount == 0 -> if (g.peers.isEmpty()) "Waiting for others to join…" else "Connecting…"
+        g.phase == GPhase.INCOMING -> (if (g.video) t("Group video call") else t("Group voice call")) + " · invitation"
+        connectedCount == 0 -> if (g.peers.isEmpty()) t("Waiting for others to join…") else t("Connecting…")
         else -> "%d:%02d · %d people".format(secs / 60, secs % 60, connectedCount + 1)
     }
 
     Box(Modifier.fillMaxSize().background(Color(0xFF101820))) {
         Column(Modifier.fillMaxSize().padding(top = 40.dp, bottom = 110.dp)) {
-            Text(g.groupName.ifEmpty { "Group call" }, color = Color.White, fontSize = 20.sp, modifier = Modifier.padding(horizontal = 16.dp))
+            Text(g.groupName.ifEmpty { t("Group call") }, color = Color.White, fontSize = 20.sp, modifier = Modifier.padding(horizontal = 16.dp))
             Text(status, color = Color(0xCCFFFFFF), fontSize = 14.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
             if (g.phase == GPhase.JOINED) {
                 val tiles = listOf<GPeer?>(null) + g.peers          // null = me
@@ -126,7 +126,7 @@ private fun Tile(app: SkyApp, g: GroupCallUi, p: GPeer?) {
             onRelease = { if (mine) gc.detachLocal(it) else gc.detachPeer(p!!.phone, it); it.release() },
             modifier = Modifier.fillMaxSize())
         else Avatar(app, "", 72.dp)
-        Text(if (mine) "You" else p!!.name + if (p.connected) "" else " · connecting…", color = Color.White, fontSize = 13.sp,
+        Text(if (mine) t("You") else p!!.name + if (p.connected) "" else " · connecting…", color = Color.White, fontSize = 13.sp,
             modifier = Modifier.align(Alignment.BottomStart).background(Color(0x66000000)).padding(horizontal = 8.dp, vertical = 3.dp))
     }
 }

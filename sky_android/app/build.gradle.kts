@@ -12,8 +12,8 @@ android {
         applicationId = "com.skychat.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 22
-        versionName = "0.22.0"
+        versionCode = 25
+        versionName = "0.24.0"
         // Only real phones (arm). Each extra CPU type adds ~100 MB of native code (WebRTC, libsignal, SQLCipher).
         // For an x86_64 emulator on a PC add "x86_64" here.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
@@ -29,10 +29,10 @@ android {
         }
     }
     buildTypes {
-        // ws:// (no encryption) is allowed in the debug build only; the release build refuses all cleartext traffic.
-        debug { manifestPlaceholders["cleartext"] = "true" }
+        // Debug and release behave the same (same address field, same wss-first / ws-fallback rule, same wire format).
+        // ws:// (port 80) is allowed in both because it is the fallback when wss:// cannot connect.
+        debug { }
         release {
-            manifestPlaceholders["cleartext"] = "false"
             isMinifyEnabled = false
             if (keystore != null) signingConfig = signingConfigs.getByName("release")
         }

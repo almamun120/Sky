@@ -16,7 +16,8 @@
          put_profile/3, get_profile/1,
          put_invite/2, get_invite/1, del_invite/1,
          phone_hash/1, find_by_hashes/1,
-         set_pin/2, has_pin/1, del_pin/1, check_pin/2]).
+         set_pin/2, has_pin/1, del_pin/1, check_pin/2,
+         put_upload/3, del_upload/1, upload_usage/1, all_uploads/0]).
 
 -record(user, {phone, name}).
 -define(SESSION_TTL, 2592000).   %% 30 days, in seconds
@@ -32,6 +33,7 @@
 -record(invite, {code, gid}).             %% group invite link: code -> group id
 -record(profile, {phone, blob, ts}).      %% blob = the owner's encrypted profile (about, photo); the server cannot read it
 -record(report, {key, ts, data}).         %% key = {Reporter, Reported}; the newest report replaces the older one
+-record(mediaown, {id, phone, size, ts}).   %% who uploaded which file, how big, when (ms): used for quotas and clean-up
 -record(grp, {gid, data}).         %% data = #{<<"name">>, <<"owner">>, <<"members">>}
 
 init() ->
@@ -71,7 +73,10 @@ init() ->
                  {disc_copies, [node()]}]),
     create(pinfail, [{attributes, record_info(fields, pinfail)},
                      {ram_copies, [node()]}]),
-    ok = mnesia:wait_for_tables([user, session, pending, grp, keybundle, otpk, presence, block, report, profile, invite, phash, pin, pinfail], 10000),
+    create(mediaown, [{attributes, record_info(fields, mediaown)},
+                      {index, [phone]},
+                      {disc_copies, [node()]}]),
+    ok = mnesia:wait_for_tables([user, session, pending, grp, keybundle, otpk, presence, block, report, profile, invite, phash, pin, pinfail, mediaown], 10000),
     %% accounts made before contact discovery existed (and a safety net): make sure every user has a hash row
     lists:foreach(fun(P) -> mnesia:dirty_write(#phash{hash = phone_hash(P), phone = P}) end,
                   mnesia:dirty_all_keys(user)),
@@ -363,3 +368,23 @@ pin_failed(Phone, Now) ->
 same_bytes(A, B) when byte_size(A) =:= byte_size(B) ->
     lists:foldl(fun({X, Y}, Acc) -> Acc bor (X bxor Y) end, 0, lists:zip(binary_to_list(A), binary_to_list(B))) =:= 0;
 same_bytes(_, _) -> false.
+
+
+%% ---- uploaded files: owner and size (quotas, clean-up) ----
+put_upload(Id, Phone, Size) ->
+    mnesia:dirty_write(#mediaown{id = Id, phone = Phone, size = Size, ts = os:system_time(millisecond)}).
+
+del_upload(Id) -> mnesia:dirty_delete(mediaown, Id).
+
+%% {TotalBytesStored, BytesUploadedInTheLast24h} of one phone.
+upload_usage(Phone) ->
+    Rows = mnesia:dirty_index_read(mediaown, Phone, #mediaown.phone),
+    Since = os:system_time(millisecond) - 86400000,
+    lists:foldl(fun(#mediaown{size = Sz, ts = T}, {All, Day}) ->
+                        {All + Sz, case T >= Since of true -> Day + Sz; false -> Day end}
+                end, {0, 0}, Rows).
+
+%% [{Id, Phone, Size, TsMs}], oldest first.
+all_uploads() ->
+    L = [{Id, P, Sz, T} || #mediaown{id = Id, phone = P, size = Sz, ts = T} <- mnesia:dirty_match_object(mediaown, #mediaown{_ = '_'})],
+    lists:keysort(4, L).

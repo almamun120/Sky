@@ -30,7 +30,7 @@ fun LockScreen(app: SkyApp) {
     fun unlock() {
         val km = ctx.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         @Suppress("DEPRECATION")
-        val intent = km.createConfirmDeviceCredentialIntent("Sky", "Unlock to continue")
+        val intent = km.createConfirmDeviceCredentialIntent("Sky", t("Unlock to continue"))
         if (intent == null) app.locked.value = false          // the phone has no lock screen any more
         else launcher.launch(intent)
     }
@@ -38,8 +38,8 @@ fun LockScreen(app: SkyApp) {
     Box(Modifier.fillMaxSize().background(Sky.surface).pointerInput(Unit) { detectTapGestures { } }, contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("🔒", fontSize = 56.sp)
-            Text("Sky is locked", fontSize = 20.sp)
-            Button(onClick = { unlock() }) { Text("Unlock") }
+            Text(t("Sky is locked"), fontSize = 20.sp)
+            Button(onClick = { unlock() }) { Text(t("Unlock")) }
         }
     }
 }

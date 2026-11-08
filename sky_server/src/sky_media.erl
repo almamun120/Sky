@@ -10,14 +10,25 @@
 init(Req0, Op) ->
     case auth(Req0) of
         error -> {ok, cowboy_req:reply(401, #{}, <<"unauthorized">>, Req0), Op};
-        {ok, _Phone} -> handle(Op, cowboy_req:method(Req0), Req0)
+        {ok, Phone} -> handle(Op, Phone, cowboy_req:method(Req0), Req0)
     end.
 
-handle(upload, <<"POST">>, Req) -> upload(Req);
-handle(download, <<"GET">>, Req) -> download(Req);
-handle(Op, _, Req) -> {ok, cowboy_req:reply(405, #{}, <<>>, Req), Op}.
+handle(upload, Phone, <<"POST">>, Req) -> upload(Phone, Req);
+handle(download, _Phone, <<"GET">>, Req) -> download(Req);
+handle(Op, _, _, Req) -> {ok, cowboy_req:reply(405, #{}, <<>>, Req), Op}.
 
-upload(Req0) ->
+%% Upload quotas per person (config, MB): upload_quota_day_mb = what may be uploaded in 24 hours (default 200),
+%% upload_quota_total_mb = what may be stored on the server at the same time (default 1000). 0 or `undefined` = no limit.
+%% Over the limit: HTTP 429, body "quota_exceeded". Files older than media_ttl_days are removed by sky_janitor,
+%% which also frees quota.
+upload(Phone, Req0) ->
+    {Total, Day} = sky_db:upload_usage(Phone),
+    case over_quota(Total, Day, 0) of
+        true -> {ok, cowboy_req:reply(429, #{}, <<"quota_exceeded">>, Req0), upload};
+        false -> upload_file(Phone, Total, Day, Req0)
+    end.
+
+upload_file(Phone, Total, Day, Req0) ->
     Id = string:lowercase(binary:encode_hex(crypto:strong_rand_bytes(16))),
     Path = path(Id),
     ok = filelib:ensure_dir(Path),
@@ -25,14 +36,31 @@ upload(Req0) ->
     Result = read_body(Req0, Fd, 0),
     file:close(Fd),
     case Result of
-        {ok, Req} ->
-            Body = jsx:encode(#{<<"id">> => Id}),
-            {ok, cowboy_req:reply(200, #{<<"content-type">> => <<"application/json">>},
-                                  Body, Req), upload};
+        {ok, Req, Size} ->
+            case over_quota(Total, Day, Size) of
+                true ->
+                    file:delete(Path),
+                    {ok, cowboy_req:reply(429, #{}, <<"quota_exceeded">>, Req), upload};
+                false ->
+                    ok = sky_db:put_upload(Id, Phone, Size),
+                    Body = jsx:encode(#{<<"id">> => Id}),
+                    {ok, cowboy_req:reply(200, #{<<"content-type">> => <<"application/json">>},
+                                          Body, Req), upload}
+            end;
         {too_large, Req} ->
             file:delete(Path),
             {ok, cowboy_req:reply(413, #{}, <<"too large">>, Req), upload}
     end.
+
+%% true if storing Add more bytes would pass a limit (Add = 0: is the person already at a limit?)
+over_quota(Total, Day, Add) ->
+    over(application:get_env(sky, upload_quota_total_mb, 1000), Total + Add, Add > 0)
+        orelse over(application:get_env(sky, upload_quota_day_mb, 200), Day + Add, Add > 0).
+
+over(Mb, Bytes, After) when is_integer(Mb), Mb > 0 ->
+    Limit = Mb * 1048576,
+    case After of true -> Bytes > Limit; false -> Bytes >= Limit end;
+over(_, _, _) -> false.
 
 read_body(Req0, Fd, Size) ->
     {Status, Data, Req} = cowboy_req:read_body(Req0, #{length => 1000000, period => 20000}),
@@ -42,7 +70,7 @@ read_body(Req0, Fd, Size) ->
         false ->
             ok = file:write(Fd, Data),
             case Status of
-                ok -> {ok, Req};
+                ok -> {ok, Req, Size1};
                 more -> read_body(Req, Fd, Size1)
             end
     end.

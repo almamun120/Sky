@@ -18,12 +18,12 @@ fun MuteDialog(group: Boolean, onPick: (Long) -> Unit, onDismiss: () -> Unit) {
     val hour = 3_600_000L
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Mute notifications") },
+        title = { Text(t("Mute notifications")) },
         text = {
             Column {
-                if (group) Text("You will still be notified when someone @-mentions you.",
+                if (group) Text(t("You will still be notified when someone @-mentions you."),
                     fontSize = 13.sp, color = Color.Gray, modifier = Modifier.padding(bottom = 8.dp))
-                listOf("8 hours" to 8 * hour, "1 week" to 168 * hour, "Always" to -1L).forEach { (label, ms) ->
+                listOf("8 hours" to 8 * hour, "1 week" to 168 * hour, t("Always") to -1L).forEach { (label, ms) ->
                     Text(label, Modifier.fillMaxWidth().padding(vertical = 12.dp).clickable {
                         onPick(if (ms < 0) ChatState.FOREVER else System.currentTimeMillis() + ms)
                     })
@@ -31,7 +31,7 @@ fun MuteDialog(group: Boolean, onPick: (Long) -> Unit, onDismiss: () -> Unit) {
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+        dismissButton = { TextButton(onClick = onDismiss) { Text(t("Cancel")) } }
     )
 }
 
@@ -44,11 +44,11 @@ fun BlockDialog(name: String, block: Boolean, onConfirm: () -> Unit, onDismiss: 
             Text(if (block)
                 "$name will no longer be able to message or call you, and will not see when you are online or typing. " +
                 "They are not told. Messages they send while blocked are never delivered, even after you unblock. " +
-                "Their messages in groups are not affected."
+                t("Their messages in groups are not affected.")
             else "$name will be able to message and call you again.")
         },
-        confirmButton = { TextButton(onClick = onConfirm) { Text(if (block) "Block" else "Unblock") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+        confirmButton = { TextButton(onClick = onConfirm) { Text(if (block) t("Block") else t("Unblock")) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(t("Cancel")) } }
     )
 }
 
@@ -57,7 +57,7 @@ fun ReportDialog(
     name: String, blockedAlready: Boolean,
     onSend: (reason: String, withMessages: Boolean, alsoBlock: Boolean) -> Unit, onDismiss: () -> Unit
 ) {
-    val reasons = listOf("Spam", "Harassment or abuse", "Scam or fraud", "Other")
+    val reasons = listOf(t("Spam"), t("Harassment or abuse"), t("Scam or fraud"), t("Other"))
     var reason by remember { mutableStateOf(reasons[0]) }
     var withMsgs by remember { mutableStateOf(true) }
     var alsoBlock by remember { mutableStateOf(!blockedAlready) }
@@ -76,7 +76,7 @@ fun ReportDialog(
                 Row(Modifier.fillMaxWidth().clickable { withMsgs = !withMsgs }, verticalAlignment = Alignment.Top) {
                     Checkbox(withMsgs, { withMsgs = it })
                     Column(Modifier.padding(top = 12.dp)) {
-                        Text("Include their last 5 messages")
+                        Text(t("Include their last 5 messages"))
                         Text("Messages are end-to-end encrypted. If you tick this, this phone sends those messages " +
                             "to Sky in readable form. Nothing else from the chat is sent.",
                             fontSize = 12.sp, color = Color.Gray)
@@ -89,7 +89,7 @@ fun ReportDialog(
                 }
             }
         },
-        confirmButton = { TextButton(onClick = { onSend(reason, withMsgs, alsoBlock && !blockedAlready) }) { Text("Report") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+        confirmButton = { TextButton(onClick = { onSend(reason, withMsgs, alsoBlock && !blockedAlready) }) { Text(t("Report")) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(t("Cancel")) } }
     )
 }

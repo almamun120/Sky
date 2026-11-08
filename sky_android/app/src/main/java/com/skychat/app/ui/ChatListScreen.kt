@@ -50,32 +50,37 @@ private data class ChatItem(
 )
 
 fun toastText(code: String) = when (code) {
-    "unknown_member" -> "One of the numbers is not registered on Sky"
-    "not_member" -> "You are not a member of this group"
-    "unknown_group" -> "This group no longer exists"
-    "not_owner", "not_admin" -> "Only group admins can do that"
-    "admins_only" -> "Only admins can send messages in this group"
-    "bad_invite" -> "This invite link is not valid any more"
-    "call_busy" -> "You are already in a call"
-    "bad_pin" -> "Wrong PIN"
-    "pin_locked" -> "Too many wrong tries. Try again in 15 minutes."
-    "bad_pin_format" -> "The PIN must be 6 digits"
-    "group_full" -> "A group can have at most 50 members"
-    "unknown_recipient" -> "That number is not registered on Sky"
-    "too_large" -> "File is larger than 25 MB"
-    "rate_limited" -> "You're going too fast. Wait a moment."
-    "no_connection" -> "Not connected to the server"
+    "unknown_member" -> t("One of the numbers is not registered on Sky")
+    "not_member" -> t("You are not a member of this group")
+    "unknown_group" -> t("This group no longer exists")
+    "not_owner", "not_admin" -> t("Only group admins can do that")
+    "admins_only" -> t("Only admins can send messages in this group")
+    "bad_invite" -> t("This invite link is not valid any more")
+    "join_pending" -> t("Request sent. An admin of the group has to approve it.")
+    "join_rejected" -> t("An admin did not accept your request to join the group")
+    "too_many_requests" -> t("This group has too many open join requests right now")
+    "call_busy" -> t("You are already in a call")
+    "bad_pin" -> t("Wrong PIN")
+    "pin_locked" -> t("Too many wrong tries. Try again in 15 minutes.")
+    "bad_pin_format" -> t("The PIN must be 6 digits")
+    "sms_failed" -> t("Could not send the SMS. Try again later.")
+    "registration_closed" -> t("New registrations are closed right now.")
+    "group_full" -> t("A group can have at most 50 members")
+    "unknown_recipient" -> t("That number is not registered on Sky")
+    "too_large" -> t("File is larger than 25 MB")
+    "rate_limited" -> t("You're going too fast. Wait a moment.")
+    "no_connection" -> t("Not connected to the server")
     "call_unverified" -> "The call could not be verified, so it was refused"
-    "e2e_required" -> "Please update Sky"
+    "e2e_required" -> t("Please update Sky")
     "no_keys" -> "This person hasn't set up secure messaging yet. Ask them to open the latest Sky."
-    "encrypt_failed" -> "Couldn't encrypt the message"
-    "bad_file" -> "Couldn't read that file"
-    "pin_limit" -> "You can pin up to 3 chats"
-    "reported" -> "Report sent"
-    "profile_saved" -> "Profile updated"
+    "encrypt_failed" -> t("Couldn't encrypt the message")
+    "bad_file" -> t("Couldn't read that file")
+    "pin_limit" -> t("You can pin up to 3 chats")
+    "reported" -> t("Report sent")
+    "profile_saved" -> t("Profile updated")
     "bad_name" -> "Please enter a name (at most 64 bytes)"
-    "upload_failed" -> "Upload failed. Try again."
-    "too_many_blocks" -> "You can block up to 1000 people"
+    "upload_failed" -> t("Upload failed. Try again.")
+    "too_many_blocks" -> t("You can block up to 1000 people")
     else -> code
 }
 
@@ -95,9 +100,10 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
     var menuOpen by remember { mutableStateOf(false) }
     val states by dao.chatStates().collectAsState(initial = emptyList())
     val peerProfiles by dao.peerProfiles().collectAsState(initial = emptyList())
+    val broadcasts by dao.broadcasts().collectAsState(initial = emptyList())
     val blockedList by dao.blockedPhones().collectAsState(initial = emptyList())
     var archivedView by remember { mutableStateOf(false) }
-    var tab by remember { mutableIntStateOf(0) }             // 0 Chats, 1 Calls
+    var tab by remember { mutableIntStateOf(0) }             // 0 Chats, 1 Updates, 2 Calls, 3 Communities
     var filter by remember { mutableIntStateOf(0) }          // 0 All, 1 Unread, 2 Groups
     val calls by dao.callLog().collectAsState(initial = emptyList())
     var actionChat by remember { mutableStateOf<ChatItem?>(null) }   // long-pressed row
@@ -126,12 +132,14 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
     val names = contacts.associate { it.phone to it.name }
     val gmap = groups.associateBy { it.gid }
     val unreadMap = unread.associate { it.chat to it.n }
+    val bmap = broadcasts.associateBy { it.id }
     fun titleOf(id: String) =
-        if (isGroup(id)) gmap[id]?.name ?: "Group" else names[id] ?: id
+        if (id.startsWith("b:")) bmap[id]?.name ?: t("Broadcast list")
+        else if (isGroup(id)) gmap[id]?.name ?: t("Group") else names[id] ?: id
 
     val items = (chats.map { m ->
         val who = when {
-            m.fromMe -> "You: "
+            m.fromMe -> t("You: ")
             isGroup(m.chat) -> (names[m.sender] ?: m.sender) + ": "
             else -> ""
         }
@@ -140,9 +148,13 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
             typing = (typingAll[m.chat] ?: emptyMap()).any { it.value > System.currentTimeMillis() },
             pinned = (st?.pinned ?: 0) > 0, archived = st?.archived == true, muted = st?.muted() == true,
             markedUnread = st?.markedUnread == true, blocked = m.chat in blockedSet, photo = photoOf[m.chat] ?: "")
+    } + broadcasts.filter { b -> chats.none { it.chat == b.id } }.map { b ->
+        val st = stateMap[b.id]
+        ChatItem(b.id, b.name, t("Broadcast list"), b.created, 0, pinned = (st?.pinned ?: 0) > 0, archived = st?.archived == true,
+            muted = st?.muted() == true, markedUnread = st?.markedUnread == true)
     } + groups.filter { g -> chats.none { it.chat == g.gid } }.map {
         val st = stateMap[it.gid]
-        ChatItem(it.gid, it.name, "Group created", it.created, 0,
+        ChatItem(it.gid, it.name, t("Group created"), it.created, 0,
             pinned = (st?.pinned ?: 0) > 0, archived = st?.archived == true, muted = st?.muted() == true,
             markedUnread = st?.markedUnread == true, photo = photoOf[it.gid] ?: "")
     })
@@ -166,7 +178,7 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
         items.filter { it.title.contains(q, ignoreCase = true) || it.id.contains(q) } +
         hits.map { m ->
             val who = when {
-                m.fromMe -> "You: "
+                m.fromMe -> t("You: ")
                 isGroup(m.chat) -> (names[m.sender] ?: m.sender) + ": "
                 else -> ""
             }
@@ -183,7 +195,7 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
                         LaunchedEffect(Unit) { focus.requestFocus() }
                         TextField(
                             query, { query = it }, singleLine = true,
-                            placeholder = { Text("Search chats and messages", color = Color(0xCCFFFFFF)) },
+                            placeholder = { Text(t("Search chats and messages"), color = Color(0xCCFFFFFF)) },
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                             modifier = Modifier.fillMaxWidth().focusRequester(focus),
                             colors = TextFieldDefaults.colors(
@@ -193,45 +205,47 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
                                 cursorColor = Color.White)
                         )
                     } else if (archivedView) {
-                        Text("Archived", fontWeight = FontWeight.Bold)
+                        Text(t("Archived"), fontWeight = FontWeight.Bold)
                     } else Column {
                         Text("Sky", fontWeight = FontWeight.Bold)
                         if (conn != Conn.Online)
-                            Text(if (conn == Conn.Connecting) "Connecting…" else "Offline", fontSize = 12.sp)
+                            Text(if (conn == Conn.Connecting) t("Connecting…") else t("Offline"), fontSize = 12.sp)
                     }
                 },
                 navigationIcon = {
                     if (searching) IconButton(onClick = { searching = false; query = "" }) {
-                        Icon(Icons.Filled.Close, contentDescription = "Close search", tint = Color.White)
+                        Icon(Icons.Filled.Close, contentDescription = t("Close search"), tint = Color.White)
                     } else if (archivedView) IconButton(onClick = { archivedView = false }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("Back"), tint = Color.White)
                     }
                 },
                 actions = {
                     if (!searching) {
                         IconButton(onClick = { searching = true }) {
-                            Icon(Icons.Filled.Search, contentDescription = "Search", tint = Color.White)
+                            Icon(Icons.Filled.Search, contentDescription = t("Search"), tint = Color.White)
                         }
-                        if (!archivedView) TextButton(onClick = { dialog = 2 }) { Text("New group", color = Color.White) }
+                        if (!archivedView) TextButton(onClick = { dialog = 2 }) { Text(t("New group"), color = Color.White) }
                     }
                     Box {
                         IconButton(onClick = { menuOpen = true }) {
                             Text("⋮", color = Color.White, fontSize = 20.sp)
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(text = { Text("Settings") },
+                            DropdownMenuItem(text = { Text(t("New broadcast")) },
+                                onClick = { menuOpen = false; dialog = 7 })
+                            DropdownMenuItem(text = { Text(t("Settings")) },
                                 onClick = { menuOpen = false; onSettings() })
-                            DropdownMenuItem(text = { Text("Server address (dev)") },
+                            DropdownMenuItem(text = { Text(t("Server address")) },
                                 onClick = { menuOpen = false; dialog = 6 })
-                            DropdownMenuItem(text = { Text("Join group by link") },
+                            DropdownMenuItem(text = { Text(t("Join group by link")) },
                                 onClick = { menuOpen = false; dialog = 5 })
-                            DropdownMenuItem(text = { Text("Profile") },
+                            DropdownMenuItem(text = { Text(t("Profile")) },
                                 onClick = { menuOpen = false; onProfile() })
-                            DropdownMenuItem(text = { Text("Starred messages") },
+                            DropdownMenuItem(text = { Text(t("Starred messages")) },
                                 onClick = { menuOpen = false; onStarred() })
-                            DropdownMenuItem(text = { Text("Privacy") },
+                            DropdownMenuItem(text = { Text(t("Privacy")) },
                                 onClick = { menuOpen = false; dialog = 4 })
-                            DropdownMenuItem(text = { Text("Log out") },
+                            DropdownMenuItem(text = { Text(t("Log out")) },
                                 onClick = { menuOpen = false; dialog = 3 })
                         }
                     }
@@ -244,17 +258,19 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
             if (!searching) NavigationBar(containerColor = Sky.surface) {
                 NavigationBarItem(selected = tab == 0, onClick = { tab = 0 },
                     icon = { BadgedBox(badge = { if (items.any { it.unread > 0 }) Badge { Text("${items.count { it.unread > 0 }}") } }) { Text("💬", fontSize = 20.sp) } },
-                    label = { Text("Chats") })
+                    label = { Text(t("Chats")) })
                 NavigationBarItem(selected = tab == 1, onClick = { tab = 1; archivedView = false },
-                    icon = { Text("◎", fontSize = 22.sp) }, label = { Text("Updates") })
+                    icon = { Text("◎", fontSize = 22.sp) }, label = { Text(t("Updates")) })
                 NavigationBarItem(selected = tab == 2, onClick = { tab = 2; archivedView = false },
-                    icon = { Text("📞", fontSize = 20.sp) }, label = { Text("Calls") })
+                    icon = { Text("📞", fontSize = 20.sp) }, label = { Text(t("Calls")) })
+                NavigationBarItem(selected = tab == 3, onClick = { tab = 3; archivedView = false },
+                    icon = { Text("🏘", fontSize = 20.sp) }, label = { Text(t("Communities")) })
             }
         },
         floatingActionButton = {
             if (tab == 0) FloatingActionButton(onClick = { dialog = 1 },
                 containerColor = Accent, contentColor = Color.White) {
-                Icon(Icons.Filled.Add, contentDescription = "New chat")
+                Icon(Icons.Filled.Add, contentDescription = t("New chat"))
             }
         }
     ) { pad ->
@@ -262,19 +278,20 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
         if (tab == 0 && !searching && !archivedView) {
             Surface(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp).clickable { searching = true },
                 shape = RoundedCornerShape(24.dp), color = Sky.pill) {
-                Text("🔍  Search chats and messages", Modifier.padding(horizontal = 16.dp, vertical = 12.dp), color = Color.Gray)
+                Text(t("🔍  Search chats and messages"), Modifier.padding(horizontal = 16.dp, vertical = 12.dp), color = Color.Gray)
             }
             Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("All", "Unread", "Groups").forEachIndexed { i, label ->
+                listOf(t("All"), t("Unread"), t("Groups")).forEachIndexed { i, label ->
                     FilterChip(selected = filter == i, onClick = { filter = i }, label = { Text(label) })
                 }
             }
         }
         Box(Modifier.weight(1f)) {
         if (tab == 1) UpdatesTab(app, { titleOf(it) }, photoOf)
+        else if (tab == 3) CommunitiesTab(app, onOpen)
         else if (tab == 2) {
             if (calls.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No calls yet.", color = Color.Gray)
+                Text(t("No calls yet."), color = Color.Gray)
             } else LazyColumn(Modifier.fillMaxSize()) {
                 items(calls, key = { it.id }) { m ->
                     val missed = m.body.endsWith("Missed")
@@ -295,9 +312,9 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
         } else
         if (shown.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(if (searching && q.isNotEmpty()) (if (q.length < 2) "Type at least 2 letters" else "Nothing found")
-                     else if (archivedView) "No archived chats."
-                     else "No chats yet. Tap + to start one.", color = Color.Gray)
+                Text(if (searching && q.isNotEmpty()) (if (q.length < 2) t("Type at least 2 letters") else t("Nothing found"))
+                     else if (archivedView) t("No archived chats.")
+                     else t("No chats yet. Tap + to start one."), color = Color.Gray)
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
@@ -306,7 +323,7 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
                         .padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("🗄", fontSize = 20.sp, modifier = Modifier.width(48.dp))
                         Spacer(Modifier.width(12.dp))
-                        Text("Archived", Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                        Text(t("Archived"), Modifier.weight(1f), fontWeight = FontWeight.Medium)
                         Text("$archivedCount", color = Color.Gray)
                     }
                     HorizontalDivider(Modifier.padding(start = 76.dp), color = Sky.divider)
@@ -330,30 +347,30 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
             title = { Text(c.title, maxLines = 1) },
             text = {
                 Column {
-                    if (!c.archived) ChatMenuLine(if (c.pinned) "Unpin chat" else "Pin chat") {
+                    if (!c.archived) ChatMenuLine(if (c.pinned) t("Unpin chat") else t("Pin chat")) {
                         actionChat = null; app.client.setPinned(c.id, !c.pinned)
                     }
-                    ChatMenuLine(if (c.archived) "Unarchive" else "Archive") {
+                    ChatMenuLine(if (c.archived) t("Unarchive") else t("Archive")) {
                         actionChat = null; app.client.setArchived(c.id, !c.archived)
                     }
-                    ChatMenuLine(if (c.muted) "Unmute notifications" else "Mute notifications") {
+                    ChatMenuLine(if (c.muted) t("Unmute notifications") else t("Mute notifications")) {
                         actionChat = null
                         if (c.muted) app.client.setMuted(c.id, 0) else { target = c; chatDlg = 1 }
                     }
-                    if (c.unread > 0 || c.markedUnread) ChatMenuLine("Mark as read") {
+                    if (c.unread > 0 || c.markedUnread) ChatMenuLine(t("Mark as read")) {
                         actionChat = null
                         if (c.unread > 0) app.client.markChatRead(c.id)
                         if (st?.markedUnread == true) app.client.setMarkedUnread(c.id, false)
-                    } else ChatMenuLine("Mark as unread") {
+                    } else ChatMenuLine(t("Mark as unread")) {
                         actionChat = null; app.client.setMarkedUnread(c.id, true)
                     }
-                    if (!isGroup(c.id)) ChatMenuLine(if (c.blocked) "Unblock" else "Block") {
+                    if (!isGroup(c.id)) ChatMenuLine(if (c.blocked) t("Unblock") else t("Block")) {
                         actionChat = null; target = c; chatDlg = 2
                     }
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { actionChat = null }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { actionChat = null }) { Text(t("Cancel")) } }
         )
     }
     target?.let { c ->
@@ -368,22 +385,22 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
         val people by dao.localContacts().collectAsState(initial = emptyList())
         val askContacts = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
             if (ok) app.client.syncContacts()
-            else Toast.makeText(ctx, "Allow contacts to find your friends on Sky", Toast.LENGTH_SHORT).show()
+            else Toast.makeText(ctx, t("Allow contacts to find your friends on Sky"), Toast.LENGTH_SHORT).show()
         }
         AlertDialog(
             onDismissRequest = { dialog = 0 },
-            title = { Text("New chat") },
+            title = { Text(t("New chat")) },
             text = {
                 Column {
-                    OutlinedTextField(phone, { phone = it }, singleLine = true, label = { Text("Phone number") })
+                    OutlinedTextField(phone, { phone = it }, singleLine = true, label = { Text(t("Phone number")) })
                     Row {
                         TextButton(onClick = {
                             if (app.client.hasContactsPermission()) app.client.syncContacts()
                             else askContacts.launch(android.Manifest.permission.READ_CONTACTS)
-                        }) { Text("Find friends") }
-                        TextButton(onClick = { dialog = 0; onQr() }) { Text("QR code") }
+                        }) { Text(t("Find friends")) }
+                        TextButton(onClick = { dialog = 0; onQr() }) { Text(t("QR code")) }
                     }
-                    if (people.isEmpty()) Text("Friends from your contacts who use Sky will appear here.",
+                    if (people.isEmpty()) Text(t("Friends from your contacts who use Sky will appear here."),
                         fontSize = 12.sp, color = Color.Gray)
                     else LazyColumn(Modifier.heightIn(max = 260.dp)) {
                         items(people, key = { it.phone }) { c ->
@@ -404,9 +421,9 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
                 TextButton(
                     enabled = phone.startsWith("+") && phone.length >= 8,
                     onClick = { dialog = 0; app.client.lookup(phone.trim()) }
-                ) { Text("Chat") }
+                ) { Text(t("Chat")) }
             },
-            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text(t("Cancel")) } }
         )
     }
 
@@ -415,12 +432,41 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
     if (dialog == 3) {
         AlertDialog(
             onDismissRequest = { dialog = 0 },
-            title = { Text("Log out?") },
-            text = { Text("Chats stored on this phone will be removed.") },
+            title = { Text(t("Log out?")) },
+            text = { Text(t("Chats stored on this phone will be removed.")) },
             confirmButton = {
-                TextButton(onClick = { dialog = 0; app.client.logout() }) { Text("Log out") }
+                TextButton(onClick = { dialog = 0; app.client.logout() }) { Text(t("Log out")) }
             },
-            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text(t("Cancel")) } }
+        )
+    }
+
+    if (dialog == 7) {
+        var bname by remember { mutableStateOf("") }
+        val picked = remember { mutableStateListOf<String>() }
+        val localPeople by dao.localContacts().collectAsState(initial = emptyList())
+        val everyone = (localPeople.map { it.phone } + items.filter { !isGroup(it.id) }.map { it.id }).distinct()
+        AlertDialog(
+            onDismissRequest = { dialog = 0 },
+            title = { Text(t("New broadcast")) },
+            text = {
+                Column {
+                    Text(t("Each person gets your message as a normal chat message."), fontSize = 12.sp, color = Color.Gray)
+                    OutlinedTextField(bname, { bname = it }, singleLine = true, label = { Text(t("Broadcast name")) })
+                    LazyColumn(Modifier.heightIn(max = 280.dp)) {
+                        items(everyone, key = { it }) { p ->
+                            Row(Modifier.fillMaxWidth().clickable { if (p in picked) picked.remove(p) else picked.add(p) },
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(p in picked, { if (it) picked.add(p) else picked.remove(p) })
+                                Text(titleOf(p), maxLines = 1)
+                            }
+                        }
+                    }
+                    if (picked.size < 2) Text(t("Choose at least 2 people"), fontSize = 12.sp, color = Color.Gray)
+                }
+            },
+            confirmButton = { TextButton(enabled = picked.size >= 2, onClick = { app.client.createBroadcast(bname, picked.toList()); dialog = 0 }) { Text(t("Create")) } },
+            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text(t("Cancel")) } }
         )
     }
 
@@ -428,15 +474,15 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
         var url by remember { mutableStateOf(app.prefs.serverUrl) }
         AlertDialog(
             onDismissRequest = { dialog = 0 },
-            title = { Text("Server address (dev)") },
+            title = { Text(t("Server address")) },
             text = {
                 Column {
                     OutlinedTextField(url, { url = it }, singleLine = true, label = { Text("wss://chat.example.com/ws") })
                     ServerNote(url)
                 }
             },
-            confirmButton = { TextButton(enabled = serverProblem(url) == null, onClick = { app.client.changeServer(url); dialog = 0 }) { Text("Save") } },
-            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text("Cancel") } }
+            confirmButton = { TextButton(enabled = serverProblem(url) == null, onClick = { app.client.changeServer(url); dialog = 0 }) { Text(t("Save")) } },
+            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text(t("Cancel")) } }
         )
     }
 
@@ -444,15 +490,15 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
         var link by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { dialog = 0 },
-            title = { Text("Join group by link") },
+            title = { Text(t("Join group by link")) },
             text = {
                 OutlinedTextField(link, { link = it }, singleLine = true,
-                    label = { Text("Paste the link or code") })
+                    label = { Text(t("Paste the link or code")) })
             },
             confirmButton = {
-                TextButton(enabled = link.isNotBlank(), onClick = { app.client.joinInvite(link); dialog = 0 }) { Text("Join") }
+                TextButton(enabled = link.isNotBlank(), onClick = { app.client.joinInvite(link); dialog = 0 }) { Text(t("Join")) }
             },
-            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text(t("Cancel")) } }
         )
     }
 
@@ -461,11 +507,11 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
         var members by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { dialog = 0 },
-            title = { Text("New group") },
+            title = { Text(t("New group")) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(gname, { gname = it }, singleLine = true, label = { Text("Group name") })
-                    OutlinedTextField(members, { members = it }, label = { Text("Members (comma separated numbers)") },
+                    OutlinedTextField(gname, { gname = it }, singleLine = true, label = { Text(t("Group name")) })
+                    OutlinedTextField(members, { members = it }, label = { Text(t("Members (comma separated numbers)")) },
                         placeholder = { Text("+8801700000002, +8801700000003") })
                 }
             },
@@ -477,9 +523,9 @@ fun ChatListScreen(app: SkyApp, onStarred: () -> Unit, onProfile: () -> Unit, on
                         app.client.createGroup(gname.trim(),
                             members.split(",").map { it.trim() }.filter { it.isNotEmpty() })
                     }
-                ) { Text("Create") }
+                ) { Text(t("Create")) }
             },
-            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { dialog = 0 }) { Text(t("Cancel")) } }
         )
     }
 }

@@ -1,6 +1,6 @@
-"""Own push service (/push). Run against a live server in dev_mode, require_e2e default."""
+"""Own push service (/push). Run against a live server started with {expose_otp_in_reply, true}, require_e2e default."""
 import asyncio, json, random, websockets, base64
-HOST="ws://127.0.0.1:8080"
+HOST="ws://127.0.0.1:4080"
 rx=lambda ws,t=3: asyncio.wait_for(ws.recv(),t)
 async def jrx(ws,t=3): return json.loads(await rx(ws,t))
 async def until(ws,typ,t=3):

@@ -3,7 +3,7 @@ binary fields really travel as bin. Needs a server with the default config: wire
 (Set SKY_WIRE=json when the server runs with {wire_formats, [json]}: only the JSON-only checks run.)"""
 import asyncio, json, os, random, base64, websockets
 import mp
-HOST = "ws://127.0.0.1:8080"
+HOST = "ws://127.0.0.1:4080"
 JSON_ONLY = os.environ.get("SKY_WIRE") == "json"
 BIN_KEYS = {"ct", "c", "sct", "blob", "identity", "pub", "sig"}
 b64 = lambda b: base64.b64encode(b).decode()

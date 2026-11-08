@@ -301,7 +301,7 @@ class CallManager(
                 out.add(b.createIceServer())
             }
         }
-        if (out.isEmpty()) out.add(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
+        // No public fallback server: the list comes from your own STUN/TURN server (login_ok "ice"). Empty = calls work inside one network only.
         return out
     }
 

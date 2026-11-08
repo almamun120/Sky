@@ -1,0 +1,22 @@
+# systemd unit for the Sky server.
+# Install: copy to /etc/systemd/system/sky.service, adjust User and the two paths, then
+#   systemctl daemon-reload && systemctl enable --now sky
+# The important line is LimitNOFILE: every phone is one open connection, and the default limit is only 1024.
+[Unit]
+Description=Sky messenger server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=sky
+WorkingDirectory=/var/lib/sky
+ExecStart=/opt/sky/bin/sky foreground
+ExecStop=/opt/sky/bin/sky stop
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+LimitNPROC=infinity
+Environment=HOME=/var/lib/sky
+# put the secrets here, not in the repository:  Environment=SKY_...=...
+[Install]
+WantedBy=multi-user.target

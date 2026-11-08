@@ -43,14 +43,18 @@ val Sky: SkyColors
 
 /** [mode]: 0 follow the phone, 1 light, 2 dark. */
 @Composable
-fun SkyTheme(mode: Int = 0, content: @Composable () -> Unit) {
+fun SkyTheme(mode: Int = 0, fontScale: Float = 1f, content: @Composable () -> Unit) {
     val dark = when (mode) { 1 -> false; 2 -> true; else -> isSystemInDarkTheme() }
     val scheme = if (dark)
         darkColorScheme(primary = Color(0xFF00A884), secondary = Accent, background = Color(0xFF111B21),
             surface = Color(0xFF111B21), onBackground = Color(0xFFE9EDEF), onSurface = Color(0xFFE9EDEF),
             surfaceVariant = Color(0xFF1F2C34), onSurfaceVariant = Color(0xFF8696A0))
     else lightColorScheme(primary = BarGreen, secondary = Accent)
-    CompositionLocalProvider(LocalSky provides (if (dark) DarkSky else LightSky)) {
+    val d = androidx.compose.ui.platform.LocalDensity.current
+    CompositionLocalProvider(
+        LocalSky provides (if (dark) DarkSky else LightSky),
+        androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(d.density, d.fontScale * fontScale)
+    ) {
         MaterialTheme(colorScheme = scheme, content = content)
     }
 }

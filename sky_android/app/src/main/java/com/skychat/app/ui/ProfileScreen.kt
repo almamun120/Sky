@@ -40,9 +40,9 @@ fun ProfileScreen(app: SkyApp, onBack: () -> Unit) {
     }
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("Profile") },
+            title = { Text(t("Profile")) },
             navigationIcon = {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("Back")) }
             },
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = Sky.bar, titleContentColor = Color.White, navigationIconContentColor = Color.White)
@@ -52,19 +52,19 @@ fun ProfileScreen(app: SkyApp, onBack: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally) {
             Avatar(app, photo, 120.dp, version = ver)
             Row {
-                TextButton(onClick = { pick.launch("image/*") }) { Text(if (photo.isEmpty()) "Add photo" else "Change photo") }
-                if (photo.isNotEmpty()) TextButton(onClick = { client.removeOwnPhoto() }) { Text("Remove", color = Color.Red) }
+                TextButton(onClick = { pick.launch("image/*") }) { Text(if (photo.isEmpty()) t("Add photo") else t("Change photo")) }
+                if (photo.isNotEmpty()) TextButton(onClick = { client.removeOwnPhoto() }) { Text(t("Remove"), color = Color.Red) }
             }
             Spacer(Modifier.height(8.dp))
-            OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Name") },
-                supportingText = { Text("Shown to everyone who gets a message from you.") })
+            OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text(t("Name")) },
+                supportingText = { Text(t("Shown to everyone who gets a message from you.")) })
             Spacer(Modifier.height(8.dp))
-            OutlinedTextField(about, { if (it.length <= 139) about = it }, Modifier.fillMaxWidth(), label = { Text("About") },
+            OutlinedTextField(about, { if (it.length <= 139) about = it }, Modifier.fillMaxWidth(), label = { Text(t("About")) },
                 supportingText = { Text("${about.length}/139. Only people you chat with can read this.") })
             Spacer(Modifier.height(8.dp))
             Text(app.prefs.phone ?: "", color = Color.Gray, fontSize = 14.sp)
             Spacer(Modifier.height(16.dp))
-            Button(onClick = { client.saveProfile(name, about) }, enabled = name.isNotBlank()) { Text("Save") }
+            Button(onClick = { client.saveProfile(name, about) }, enabled = name.isNotBlank()) { Text(t("Save")) }
         }
     }
 }

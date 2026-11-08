@@ -121,6 +121,7 @@ class PushService : Service() {
         gaveUp = false
         if (socket != null && socketUrl != app.prefs.pushUrl) {      // server address was changed
             socket?.cancel(); socket = null
+            app.prefs.pushFallback = false
         }
         ui.removeCallbacks(reconnect)
         connect()
@@ -138,8 +139,10 @@ class PushService : Service() {
             return                                   // bad server address; nothing to connect to
         }
         socketUrl = url
+        var opened = false
         socket = http.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                opened = true
                 webSocket.send(JSONObject().put("type", "hello").put("token", token).toString())
             }
 
@@ -163,16 +166,23 @@ class PushService : Service() {
                 webSocket.close(1000, null)
             }
 
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = lost(webSocket)
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = lost(webSocket)
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = lost(webSocket, opened)
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = lost(webSocket, opened)
         })
     }
 
-    private fun lost(w: WebSocket) {
+    private fun lost(w: WebSocket, wasOpen: Boolean) {
         ui.post {
             if (w !== socket) return@post
             socket = null
             if (destroyed || gaveUp) return@post
+            val prefs = (application as SkyApp).prefs
+            if (!wasOpen && !prefs.pushFallback && com.skychat.app.net.ServerUrl.fallback(prefs.serverUrl) != null) {
+                prefs.pushFallback = true          // wss:// could not connect: try the ws:// fallback at once
+                connect()
+                return@post
+            }
+            prefs.pushFallback = false             // the next attempt starts with wss:// again
             val seconds = minOf(60, 2 shl minOf(retry, 5)) + Random.nextInt(0, 3)   // 2,4,8,..60 s
             retry++
             ui.removeCallbacks(reconnect)

@@ -9,4 +9,4 @@ init([]) ->
                         restart => permanent, type => worker} end,
     {ok, {#{strategy => one_for_one, intensity => 5, period => 10},
           [Child(sky_router), Child(sky_otp), Child(sky_push),
-           Child(sky_janitor), Child(sky_calls)]}}.
+           Child(sky_janitor), Child(sky_calls), Child(sky_sms_gw), Child(sky_admin_srv)]}}.

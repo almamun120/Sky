@@ -1,5 +1,5 @@
 import asyncio, json, websockets, requests, uuid
-URL = "ws://127.0.0.1:8080/ws"
+URL = "ws://127.0.0.1:4080/ws"
 async def rx(ws, t=3):
     return json.loads(await asyncio.wait_for(ws.recv(), t))
 async def until(ws, typ, t=3):
@@ -50,12 +50,12 @@ async def main():
     assert mb["group"]==g["gid"] and mc["body"]=="hi team"
     print("5 group ok")
     # media
-    r = requests.post("http://127.0.0.1:8080/upload", data=b"x"*300000, headers={"Authorization":"Bearer "+ta})
+    r = requests.post("http://127.0.0.1:4080/upload", data=b"x"*300000, headers={"Authorization":"Bearer "+ta})
     assert r.status_code==200, r.text; mid = r.json()["id"]
-    d = requests.get(f"http://127.0.0.1:8080/media/{mid}", headers={"Authorization":"Bearer "+tb})
+    d = requests.get(f"http://127.0.0.1:4080/media/{mid}", headers={"Authorization":"Bearer "+tb})
     assert d.status_code==200 and len(d.content)==300000
-    assert requests.get(f"http://127.0.0.1:8080/media/{mid}").status_code==401
-    assert requests.get("http://127.0.0.1:8080/media/../../etc/passwd", headers={"Authorization":"Bearer "+tb}).status_code in (400,404)
+    assert requests.get(f"http://127.0.0.1:4080/media/{mid}").status_code==401
+    assert requests.get("http://127.0.0.1:4080/media/../../etc/passwd", headers={"Authorization":"Bearer "+tb}).status_code in (400,404)
     await a.send(json.dumps({"type":"send","id":"f1","to":"+8801700000002","body":"","kind":"image","media":mid,"fname":"p.jpg","mime":"image/jpeg","size":300000}))
     await until(a,"ack"); m = await until(b,"msg"); assert m["kind"]=="image" and m["media"]==mid
     print("6 media ok")

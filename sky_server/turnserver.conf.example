@@ -1,14 +1,26 @@
-# coturn: relay for calls when a direct connection is impossible (strict NAT, mobile data).
-# Install: apt install coturn. Use this as /etc/turnserver.conf and set the same secret
-# in config/sys.config (turn_urls, turn_secret).
+# coturn: your own STUN + TURN server for calls (nothing goes through Google or any other third party).
+# It answers STUN (finding the public address) and TURN (relay when a direct connection is impossible: strict NAT, mobile data).
+# Easiest: run  sudo scripts/turn_setup.sh chat.mydomain.com  , it installs coturn and writes this file for you.
+# By hand: apt install coturn, use this as /etc/turnserver.conf, set the same secret as turn_secret in config/sys.config.
+#
+# Ports to open in the firewall:  3478 UDP+TCP (STUN/TURN),  5349 TCP (TURN over TLS),  50000-51000 UDP (relay range below)
 listening-port=3478
 tls-listening-port=5349
+min-port=50000
+max-port=51000
 fingerprint
 use-auth-secret
 static-auth-secret=CHANGE_ME_LONG_RANDOM
-realm=turn.example.com
+realm=chat.example.com
 total-quota=100
 no-multicast-peers
 no-cli
-# cert=/etc/letsencrypt/live/turn.example.com/fullchain.pem
-# pkey=/etc/letsencrypt/live/turn.example.com/privkey.pem
+# never let a relay reach machines inside the server's own network
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+# TLS (turns:) needs a certificate; the one Caddy obtained is fine if coturn may read it:
+# cert=/etc/ssl/sky/fullchain.pem
+# pkey=/etc/ssl/sky/privkey.pem
+# If the server sits behind NAT (cloud VMs often do): external-ip=PUBLIC_IP/PRIVATE_IP

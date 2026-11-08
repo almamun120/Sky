@@ -48,7 +48,10 @@ class MainActivity : ComponentActivity() {
                 else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
             }
             val mode by app.themeMode.collectAsState()
-            SkyTheme(mode) { AppNav(app, openRequest) }
+            val fs by app.fontScale.collectAsState()
+            val lang by app.lang.collectAsState()
+            L.apply(lang)
+            SkyTheme(mode, fs) { AppNav(app, openRequest) }
         }
 
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -150,7 +153,12 @@ fun AppNav(app: SkyApp, openRequest: MutableStateFlow<String?>) {
                 LoginScreen(app) { nav.navigate("chats") { popUpTo("login") { inclusive = true } } }
             }
             composable("chats") {
-                ChatListScreen(app, onStarred = { nav.navigate("starred") }, onProfile = { nav.navigate("profile") }, onSettings = { nav.navigate("settings") }, onQr = { nav.navigate("qr") }) { id -> nav.navigate(chatRoute(id)) }
+                ChatListScreen(app, onStarred = { nav.navigate("starred") }, onProfile = { nav.navigate("profile") }, onSettings = { nav.navigate("settings") }, onQr = { nav.navigate("qr") }) { id ->
+                    if (id.startsWith("b:")) nav.navigate("broadcast/" + android.net.Uri.encode(id)) else nav.navigate(chatRoute(id))
+                }
+            }
+            composable("broadcast/{id}") { e ->
+                BroadcastScreen(app, e.arguments!!.getString("id")!!) { nav.popBackStack() }
             }
             composable("settings") {
                 SettingsScreen(app, onBack = { nav.popBackStack() }, onProfile = { nav.navigate("profile") },

@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sky admin</title>
+<style>
+  :root { --bg:#f4f6f8; --card:#fff; --ink:#1c2b33; --mute:#6b7c85; --line:#dfe5e9; --green:#1faf5a; --red:#d32f2f; --amber:#e6a100; --bar:#0b6b5d; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--bar); color:#fff; display:flex; align-items:center; gap:16px; padding:10px 16px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0 12px 0 0; }
+  nav button { background:none; border:0; color:#cfe8e3; padding:8px 12px; font:inherit; cursor:pointer; border-radius:6px; }
+  nav button.on { background:rgba(255,255,255,.18); color:#fff; }
+  header .sp { flex:1; }
+  main { max-width:1100px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:14px; }
+  .card h2 { margin:0 0 10px; font-size:15px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  .stat b { display:block; font-size:22px; }
+  .stat span { color:var(--mute); font-size:12px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  th { color:var(--mute); font-weight:600; font-size:12px; }
+  input[type=text], input[type=password], input[type=number], select, textarea { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; width:100%; background:#fff; color:var(--ink); }
+  textarea { min-height:70px; font-family:ui-monospace, monospace; font-size:13px; }
+  button.act { font:inherit; padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.main { background:var(--green); border-color:var(--green); color:#fff; }
+  button.bad { color:var(--red); }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  .row > label { min-width:210px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; color:#fff; }
+  .up { background:var(--green); } .down { background:var(--red); } .off { background:#90a4ae; } .warn { background:var(--amber); }
+  .note { color:var(--mute); font-size:12px; }
+  .msg { padding:8px 12px; border-radius:6px; margin:8px 0; }
+  .ok { background:#e6f6ec; color:#14653a; } .err { background:#fdeaea; color:#9a1c1c; }
+  canvas { width:100%; height:130px; display:block; }
+  .charts { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:14px; }
+  #login { max-width:340px; margin:12vh auto; }
+  pre { background:#10242c; color:#d6f5e6; padding:10px; border-radius:6px; overflow:auto; font-size:12px; }
+  .small { width:80px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.className = v; else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (v === true) e.setAttribute(k, ""); else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c != null) e.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return e;
+}
+async function api(path, body) {
+  const opt = { headers: { "X-Sky-Admin": "1" }, credentials: "same-origin" };
+  if (body !== undefined) { opt.method = "POST"; opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const r = await fetch("/admin/api/" + path, opt);
+  let data = {}; try { data = await r.json(); } catch (e) {}
+  if (r.status === 401 && path !== "login") { showLogin(); throw new Error("login needed"); }
+  if (!r.ok) throw new Error(data.error || ("error " + r.status));
+  return data;
+}
+const fmtBytes = (n) => n > 1e9 ? (n / 1e9).toFixed(2) + " GB" : n > 1e6 ? (n / 1e6).toFixed(1) + " MB" : (n / 1e3).toFixed(0) + " KB";
+const fmtTime = (s) => { const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? d + "d " : "") + h + "h " + m + "m"; };
+let timer = null, tab = "dashboard";
+
+// ---------------- login ----------------
+function showLogin(note) {
+  clearInterval(timer);
+  const pw = el("input", { type: "password", placeholder: "admin password", autocomplete: "current-password" });
+  const msg = el("div", { class: "msg err", style: "display:none" });
+  const go = async () => {
+    try { await api("login", { password: pw.value }); start(); }
+    catch (e) { msg.textContent = e.message; msg.style.display = "block"; }
+  };
+  pw.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  $("#app").replaceChildren(el("div", { class: "card", id: "login" },
+    el("h2", {}, "Sky admin"), note ? el("div", { class: "note" }, note) : null, el("div", { class: "row" }, pw),
+    el("div", { class: "row" }, el("button", { class: "act main", onclick: go }, "Log in")), msg,
+    location.protocol === "http:" && location.hostname !== "localhost" ? el("div", { class: "msg err" }, "This connection is not encrypted. Use https:// (wss) for real use.") : null));
+  pw.focus();
+}
+
+// ---------------- frame ----------------
+const tabs = [["dashboard", "Dashboard"], ["gateways", "SMS gateways"], ["settings", "Settings"], ["calls", "Calls (STUN/TURN)"], ["reports", "Reports"]];
+function frame() {
+  const nav = el("nav", {}, tabs.map(([id, name]) => el("button", { class: id === tab ? "on" : "", onclick: () => { tab = id; frame(); } }, name)));
+  $("#app").replaceChildren(
+    el("header", {}, el("h1", {}, "Sky admin"), nav, el("div", { class: "sp" }),
+      el("button", { class: "act", onclick: async () => { await api("logout", {}); showLogin("Logged out."); } }, "Log out")),
+    el("main", { id: "main" }));
+  clearInterval(timer);
+  ({ dashboard, gateways, settings, calls, reports })[tab]();
+}
+async function start() { try { await api("me"); frame(); } catch (e) { showLogin(); } }
+
+// ---------------- dashboard ----------------
+function drawLine(canvas, xs, ys, color, fmt) {
+  const w = canvas.clientWidth * 2, h = canvas.clientHeight * 2; canvas.width = w; canvas.height = h;
+  const g = canvas.getContext("2d"); g.clearRect(0, 0, w, h);
+  if (ys.length < 2) return;
+  const max = Math.max(1, ...ys) * 1.15;
+  g.strokeStyle = "#dfe5e9"; g.lineWidth = 2; g.beginPath(); g.moveTo(0, h - 1); g.lineTo(w, h - 1); g.stroke();
+  g.strokeStyle = color; g.lineWidth = 3; g.beginPath();
+  ys.forEach((y, i) => { const px = i / (ys.length - 1) * w, py = h - 8 - y / max * (h - 24); i ? g.lineTo(px, py) : g.moveTo(px, py); });
+  g.stroke();
+  g.fillStyle = "#6b7c85"; g.font = "22px system-ui"; g.fillText("max " + fmt(Math.max(...ys)) + "   now " + fmt(ys[ys.length - 1]), 8, 24);
+}
+function dashboard() {
+  const main = $("#main");
+  const grid = el("div", { class: "grid" }), charts = el("div", { class: "charts" }), gw = el("div"), tbl = el("div"), warn = el("div");
+  const cvs = ["Connected phones", "Messages per minute", "Server queue (run queue)", "Memory"].map((t) => {
+    const c = el("canvas"); charts.append(el("div", { class: "card" }, el("h2", {}, t), c)); return c; });
+  main.replaceChildren(warn, grid, charts, el("div", { class: "card" }, el("h2", {}, "SMS gateways"), gw), el("div", { class: "card" }, el("h2", {}, "Database rows"), tbl));
+  const refresh = async () => {
+    let s; try { s = await api("stats"); } catch (e) { return; }
+    warn.replaceChildren(s.console_secrets ? el("div", { class: "msg err" }, "CONSOLE SECRETS ARE ON: SMS codes and PINs are written to the server console. Turn this off under Settings for real users.") : null);
+    const stat = (v, l) => el("div", { class: "stat" }, el("b", {}, v), el("span", {}, l));
+    grid.replaceChildren(stat(s.connections, "connected phones"), stat(s.online_users, "numbers online"), stat(s.messages + s.group_messages, "messages since start"),
+      stat(s.logins, "logins"), stat(s.calls, "calls"), stat(s.otp_requests, "SMS codes asked"), stat(s.sms_ok + " / " + s.sms_fail, "SMS ok / failed"),
+      stat(s.rate_limited, "requests refused (rate limit)"), stat(s.errors, "error replies"), stat(s.run_queue, "run queue (should be ~0)"),
+      stat(s.processes, "Erlang processes"), stat(fmtBytes(s.memory.total), "memory"), stat(fmtTime(s.uptime), "uptime"));
+    const h = s.history, xs = h.map((p) => p.t);
+    drawLine(cvs[0], xs, h.map((p) => p.conns), "#1faf5a", (v) => Math.round(v));
+    const per = h.map((p, i) => i < 6 ? 0 : Math.max(0, (p.msgs - h[i - 6].msgs)));       // 6 samples = 60 s
+    drawLine(cvs[1], xs, per, "#0b6b5d", (v) => Math.round(v));
+    drawLine(cvs[2], xs, h.map((p) => p.run_queue), "#e6a100", (v) => Math.round(v));
+    drawLine(cvs[3], xs, h.map((p) => p.mem / 1e6), "#5c6bc0", (v) => Math.round(v) + " MB");
+    gw.replaceChildren(gatewayTable(s.gateways));
+    tbl.replaceChildren(el("div", { class: "note" }, Object.entries(s.tables).map(([k, v]) => k + ": " + v).join("   ")));
+  };
+  refresh(); timer = setInterval(refresh, 5000);
+}
+function gatewayTable(list) {
+  if (!list.length) return el("div", { class: "note" }, "No SMS gateway. Add one under SMS gateways.");
+  return el("table", {}, el("tr", {}, ["id", "name", "state", "ok", "failed", "last problem"].map((h) => el("th", {}, h))),
+    list.map((g) => el("tr", {}, el("td", {}, g.id), el("td", {}, g.name),
+      el("td", {}, el("span", { class: "pill " + (!g.enabled ? "off" : g.up ? "up" : "down") }, !g.enabled ? "disabled" : g.up ? "connected" : "down")),
+      el("td", {}, g.ok), el("td", {}, g.fail), el("td", { class: "note" }, g.err))));
+}
+
+// ---------------- SMS gateways ----------------
+async function gateways() {
+  const main = $("#main"); let list = [], status = [];
+  const msg = el("div"), tbody = el("tbody");
+  const say = (text, ok) => { msg.replaceChildren(el("div", { class: "msg " + (ok ? "ok" : "err") }, text)); };
+  const stateOf = (id) => { const s = status.find((x) => x.id === id); return !s ? el("span", { class: "pill off" }, "not saved") :
+    el("span", { class: "pill " + (!s.enabled ? "off" : s.up ? "up" : "down"), title: s.err || "" }, !s.enabled ? "disabled" : s.up ? "connected" : "down"); };
+  const rows = () => {
+    tbody.replaceChildren(...list.map((g, i) => {
+      const f = (k, type, cls) => { const x = el("input", { type: type || "text", class: cls || "", value: g[k] ?? "" });
+        x.addEventListener("input", () => { g[k] = type === "number" ? Number(x.value) : x.value; }); return x; };
+      const sim = el("select", {}, [["", "default"], ["1", "SIM 1"], ["2", "SIM 2"]].map(([v, t]) => el("option", { value: v, selected: String(g.sim ?? "") === v }, t)));
+      sim.addEventListener("change", () => { g.sim = sim.value === "" ? null : Number(sim.value); });
+      const chk = (k) => { const x = el("input", { type: "checkbox", checked: !!g[k] }); x.addEventListener("change", () => { g[k] = x.checked; }); return x; };
+      const extra = el("input", { type: "text", value: JSON.stringify(g.extra || {}), title: "extra fields sent with every request, a JSON object" });
+      extra.addEventListener("change", () => { try { g.extra = JSON.parse(extra.value || "{}"); extra.style.borderColor = ""; } catch (e) { extra.style.borderColor = "#d32f2f"; } });
+      return el("tr", {}, el("td", {}, g.id), el("td", {}, f("name")), el("td", {}, f("url")), el("td", {}, sim), el("td", {}, f("prio", "number", "small")),
+        el("td", {}, chk("enabled")), el("td", {}, chk("insecure")), el("td", {}, extra), el("td", {}, stateOf(g.id)),
+        el("td", {}, el("button", { class: "act bad", onclick: () => { if (confirm("Delete gateway " + g.id + "?")) { list.splice(i, 1); rows(); } } }, "Delete")));
+    }));
+  };
+  const load = async () => { const d = await api("gateways"); list = d.gateways; status = d.status; rows(); };
+  const phone = el("input", { type: "text", placeholder: "+8801712345678" });
+  main.replaceChildren(el("div", { class: "card" }, el("h2", {}, "SMS gateways"),
+    el("div", { class: "note" }, "The server connects to each gateway over ws:// or wss:// and sends the SMS codes through the first one that works (smallest priority first). Add, change or delete, then Save."),
+    el("table", {}, el("thead", {}, el("tr", {}, ["id", "name", "address (ws:// or wss://)", "SIM", "priority", "on", "self-signed ok", "extra (JSON)", "state", ""].map((h) => el("th", {}, h)))), tbody),
+    el("div", { class: "row" },
+      el("button", { class: "act", onclick: () => { let n = 1; while (list.some((g) => g.id === "g" + n)) n++;
+        list.push({ id: "g" + n, name: "", url: "ws://", sim: null, prio: 100, enabled: true, insecure: false, extra: {} }); rows(); } }, "+ Add gateway"),
+      el("button", { class: "act main", onclick: async () => { try { await api("gateways", { gateways: list }); say("Saved. The server uses the new list at once.", true); setTimeout(load, 1500); } catch (e) { say(e.message, false); } } }, "Save"),
+      el("button", { class: "act", onclick: load }, "Refresh state")), msg),
+    el("div", { class: "card" }, el("h2", {}, "Send a test SMS"), el("div", { class: "note" }, "Goes through the gateways above."),
+      el("div", { class: "row" }, phone, el("button", { class: "act", onclick: async () => { try { const r = await api("gateways/test", { phone: phone.value.trim() });
+        say(r.ok ? "The gateway accepted the SMS." : "Failed: " + r.error, r.ok); } catch (e) { say(e.message, false); } } }, "Send test"))));
+  await load(); timer = setInterval(async () => { try { const d = await api("gateways"); status = d.status; rows(); } catch (e) {} }, 10000);
+}
+
+// ---------------- settings ----------------
+async function settings() {
+  const main = $("#main"); const d = await api("settings"); const S = d.settings; const msg = el("div");
+  const changed = {};
+  const toggle = (key, label, hint, value, get) => { const x = el("input", { type: "checkbox", checked: value });
+    x.addEventListener("change", () => { changed[key] = x.checked; }); return el("div", { class: "row" }, el("label", {}, label, hint ? el("div", { class: "note" }, hint) : null), x); };
+  const fmts = ["msgpack", "json"].map((f) => { const x = el("input", { type: "checkbox", checked: S.wire_formats.value.includes(f) });
+    x.addEventListener("change", () => { changed.wire_formats = fmts_().filter((n) => n); }); return [f, x]; });
+  const fmts_ = () => fmts.map(([f, x]) => x.checked ? f : null);
+  const sms = el("input", { type: "text", value: S.sms_text.value }); sms.addEventListener("input", () => { changed.sms_text = sms.value; });
+  main.replaceChildren(el("div", { class: "card" }, el("h2", {}, "Switches"),
+    toggle("console_secrets", "Console secrets", "ON: SMS codes and two-step PINs are also printed on the server console. The app is never told the code. Turn it off for real users.", d.console_secrets),
+    toggle("registration_open", "New registrations allowed", "OFF: only numbers that already have an account can ask for a code.", S.registration_open.value),
+    toggle("ws_compress", "WebSocket compression", "permessage-deflate; applies to connections opened from now on.", S.ws_compress.value),
+    el("div", { class: "row" }, el("label", {}, "Wire formats offered to the app", el("div", { class: "note" }, "MessagePack is smaller; JSON is for old clients and debugging. At least one.")),
+      fmts.map(([f, x]) => el("label", { style: "min-width:0;display:flex;gap:4px;align-items:center" }, x, f)))),
+    el("div", { class: "card" }, el("h2", {}, "SMS text"), el("div", { class: "note" }, "~s is where the code goes (exactly once)."), el("div", { class: "row" }, sms)),
+    el("div", { class: "row" }, el("button", { class: "act main", onclick: async () => {
+      try { if (changed.wire_formats && !changed.wire_formats.length) throw new Error("choose at least one wire format");
+        await api("settings", changed); for (const k of Object.keys(changed)) delete changed[k]; msg.replaceChildren(el("div", { class: "msg ok" }, "Saved. Active now."));
+        if (changed) setTimeout(() => settings(), 800);
+      } catch (e) { msg.replaceChildren(el("div", { class: "msg err" }, e.message)); } } }, "Save")), msg,
+    el("div", { class: "note" }, "Values changed here are kept in sky_settings.json on the server and win over config/sys.config."));
+}
+
+// ---------------- STUN / TURN ----------------
+async function calls() {
+  const main = $("#main"); const d = await api("settings"); const S = d.settings; const msg = el("div");
+  const stun = el("textarea", {}, S.stun_urls.value.join("\n")), turn = el("textarea", {}, S.turn_urls.value.join("\n"));
+  const secret = el("input", { type: "password", placeholder: S.turn_secret.configured ? "(set: type a new one to replace it)" : "(not set)", autocomplete: "off" });
+  const ttl = el("input", { type: "number", value: S.turn_ttl.value, class: "small" });
+  const lines = (t) => t.value.split("\n").map((x) => x.trim()).filter(Boolean);
+  const snippet = el("pre");
+  const draw = () => { const host = (lines(turn)[0] || "turn:turn.example.com:3478").replace(/^turns?:/, "").replace(/[?:].*$/, "");
+    snippet.textContent = "# /etc/turnserver.conf (coturn) - the same secret as above\nrealm=" + host + "\nuse-auth-secret\nstatic-auth-secret=" + (secret.value || "<the TURN secret>") +
+      "\nlistening-port=3478\ntls-listening-port=5349\nmin-port=49152\nmax-port=65535\nfingerprint\nno-multicast-peers\ncert=/etc/letsencrypt/live/" + host + "/fullchain.pem\npkey=/etc/letsencrypt/live/" + host + "/privkey.pem\n"; };
+  [turn, secret].forEach((x) => x.addEventListener("input", draw)); draw();
+  main.replaceChildren(el("div", { class: "card" }, el("h2", {}, "STUN and TURN (voice and video calls)"),
+    el("div", { class: "note" }, "Phones connect directly when they can; TURN relays the call when they cannot (mobile networks, strict Wi-Fi). New values are given to phones at their next login; calls started before keep the old ones."),
+    el("div", { class: "row" }, el("label", {}, "STUN addresses", el("div", { class: "note" }, "one per line: stun:host:3478. Empty = taken from the TURN addresses.")), stun),
+    el("div", { class: "row" }, el("label", {}, "TURN addresses", el("div", { class: "note" }, "one per line: turn:host:3478  or  turns:host:5349?transport=tcp")), turn),
+    el("div", { class: "row" }, el("label", {}, "TURN secret", el("div", { class: "note" }, "must equal static-auth-secret of coturn")), secret),
+    el("div", { class: "row" }, el("label", {}, "Credentials valid for (seconds)"), ttl),
+    el("div", { class: "row" }, el("button", { class: "act main", onclick: async () => {
+      try { const body = { stun_urls: lines(stun), turn_urls: lines(turn), turn_ttl: Number(ttl.value) }; if (secret.value) body.turn_secret = secret.value;
+        await api("settings", body); msg.replaceChildren(el("div", { class: "msg ok" }, "Saved.")); secret.value = ""; }
+      catch (e) { msg.replaceChildren(el("div", { class: "msg err" }, e.message)); } } }, "Save")), msg),
+    el("div", { class: "card" }, el("h2", {}, "coturn configuration to match"), snippet,
+      el("div", { class: "note" }, "Open ports 3478 (UDP+TCP), 5349 (TCP) and 49152-65535 (UDP) on the TURN machine.")));
+}
+
+// ---------------- reports ----------------
+async function reports() {
+  const d = await api("reports"); const when = (s) => new Date(s).toLocaleString();
+  $("#main").replaceChildren(el("div", { class: "card" }, el("h2", {}, "Reports from users (newest 100)"),
+    d.reports.length ? el("table", {}, el("tr", {}, ["time", "reporter", "reported", "reason", "messages sent along"].map((h) => el("th", {}, h))),
+      d.reports.map((r) => el("tr", {}, el("td", {}, when(r.ts)), el("td", {}, r.reporter), el("td", {}, r.reported), el("td", {}, r.reason),
+        el("td", {}, (r.msgs || []).map((m) => el("div", {}, m.b)))))) : el("div", { class: "note" }, "No reports.")));
+}
+
+start();
+</script>
+</body>
+</html>

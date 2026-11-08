@@ -145,7 +145,7 @@ private class PItem(val uri: Uri, val video: Boolean) {
     var once by mutableStateOf(false)      // view once
 }
 
-private val Aspects = listOf(0f to "Original", 1f to "1:1", 4f / 3f to "4:3", 3f / 4f to "3:4", 16f / 9f to "16:9")
+private val Aspects = listOf(0f to t("Original"), 1f to "1:1", 4f / 3f to "4:3", 3f / 4f to "3:4", 16f / 9f to "16:9")
 
 /**
  * Shown after the photos / videos were chosen (gallery or camera) and before anything is sent:
@@ -168,10 +168,10 @@ fun MediaPreview(app: SkyApp, uris: List<Uri>, title: String, allowOnce: Boolean
                 TextButton(onClick = onClose) { Text("✕", color = Color.White, fontSize = 22.sp) }
                 Spacer(Modifier.weight(1f))
                 if (allowOnce) TextButton(onClick = { cu.once = !cu.once }) {
-                    Text(if (cu.once) "🔥 View once: on" else "🔥 View once", color = if (cu.once) Accent else Color.White)
+                    Text(if (cu.once) t("🔥 View once: on") else t("🔥 View once"), color = if (cu.once) Accent else Color.White)
                 }
                 if (!cu.video) {
-                    TextButton(onClick = { cu.rotation = (cu.rotation + 90) % 360 }) { Text("⟳ Rotate", color = Color.White) }
+                    TextButton(onClick = { cu.rotation = (cu.rotation + 90) % 360 }) { Text(t("⟳ Rotate"), color = Color.White) }
                     TextButton(onClick = { cu.aspect = (cu.aspect + 1) % Aspects.size }) { Text("▣ " + Aspects[cu.aspect].second, color = Color.White) }
                 }
             }
@@ -203,7 +203,7 @@ fun MediaPreview(app: SkyApp, uris: List<Uri>, title: String, allowOnce: Boolean
             }
             Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextField(cu.caption, { v -> if (v.length <= 1000) cu.caption = v }, Modifier.weight(1f),
-                    placeholder = { Text(if (items.size > 1) "Caption for this picture" else "Add a caption") }, maxLines = 3,
+                    placeholder = { Text(if (items.size > 1) t("Caption for this picture") else t("Add a caption")) }, maxLines = 3,
                     colors = TextFieldDefaults.colors(focusedContainerColor = Color(0xFF1F2C34), unfocusedContainerColor = Color(0xFF1F2C34),
                         focusedTextColor = Color.White, unfocusedTextColor = Color.White,
                         focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
@@ -211,7 +211,7 @@ fun MediaPreview(app: SkyApp, uris: List<Uri>, title: String, allowOnce: Boolean
                 Spacer(Modifier.width(8.dp))
                 Button(onClick = {
                     onSend(items.map { p -> ChatClient.OutMedia(p.uri, p.caption.trim(), p.rotation, Aspects[p.aspect].first, p.once) })
-                }, colors = ButtonDefaults.buttonColors(containerColor = Accent)) { Text("Send" + if (items.size > 1) " (${items.size})" else "") }
+                }, colors = ButtonDefaults.buttonColors(containerColor = Accent)) { Text(t("Send") + if (items.size > 1) " (${items.size})" else "") }
             }
             Text("To: $title", Modifier.padding(start = 16.dp, bottom = 12.dp), color = Color.Gray, fontSize = 12.sp)
         }
@@ -278,7 +278,7 @@ fun OnceViewer(app: SkyApp, m: Msg, onClose: () -> Unit) {
             }
             Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(top = 32.dp, start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onClose) { Text("✕", color = Color.White, fontSize = 22.sp) }
-                Text("🔥 View once. It is deleted when you close it.", color = Color(0xCCFFFFFF), fontSize = 13.sp)
+                Text(t("🔥 View once. It is deleted when you close it."), color = Color(0xCCFFFFFF), fontSize = 13.sp)
             }
             if (m.body.isNotBlank()) Text(m.body, Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                 .background(Color(0x99000000)).padding(16.dp), color = Color.White, textAlign = TextAlign.Center)

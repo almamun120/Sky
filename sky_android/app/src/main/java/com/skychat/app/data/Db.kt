@@ -60,6 +60,7 @@ fun previewText(kind: String, body: String, fname: String) = when (kind) {
     "audio" -> "\uD83C\uDFA4 Voice message"
     "file" -> "\uD83D\uDCCE " + fname.ifEmpty { "File" }
     "deleted" -> "\uD83D\uDEAB Message deleted"
+    "poll" -> "\uD83D\uDCCA " + (try { org.json.JSONObject(body).optString("q") } catch (e: Exception) { "" }).ifEmpty { "Poll" }
     else -> body
 }
 
@@ -78,7 +79,12 @@ data class ChatGroup(
     val photoKey: String = "",    // its AES key (base64), kept so new members can be sent the photo too
     val photoPath: String = "",   // decrypted-at-rest copy on this phone
     val admins: String = "",      // comma-separated admin phones (the server always includes the owner)
-    val announce: Boolean = false // true = only admins can send messages
+    val announce: Boolean = false, // true = only admins can send messages
+    val approval: Boolean = false, // true = people who join through the invite link wait for an admin
+    val requests: String = "",     // admins only: JSON [{"p": phone, "n": name}, ...] waiting to be accepted
+    val parent: String = "",       // id of the community this group belongs to ("" = none)
+    val community: Boolean = false,// true = this is the announcement group of a community (the community's id is its gid)
+    val subs: String = ""          // community only: JSON [{"g": gid, "n": name}, ...] the groups that belong to it
 ) {
     fun isAdmin(phone: String?) = phone != null && (owner == phone || admins.split(",").contains(phone))
 }
@@ -143,6 +149,21 @@ data class ChatState(
 /** People this account has blocked. The server keeps the truth; this is a copy for the UI and for dropping late messages. */
 @Entity(tableName = "blocked")
 data class Blocked(@PrimaryKey val phone: String)
+
+/** A broadcast list: one message that goes to every member as an ordinary one-to-one message. [id] is "b:..." and is also the chat id of the list's own history. */
+@Entity(tableName = "broadcast_list")
+data class BroadcastList(@PrimaryKey val id: String, val name: String, val members: String, val created: Long)
+
+/** One person's vote in a poll. [choices] = comma-separated option numbers ("" = no vote). The poll itself is a message of kind "poll". */
+@Entity(tableName = "poll_vote", primaryKeys = ["pollId", "voter"])
+data class PollVote(val pollId: String, val voter: String, val choices: String, val ts: Long)
+
+/** The devices (numbers 1..) a contact is known to have, comma-separated, e.g. "1,2". Used to encrypt to every device. */
+@Entity(tableName = "peer_dev")
+data class PeerDev(@PrimaryKey val phone: String, val devs: String)
+
+/** One stored attachment (for the storage screen). */
+data class MediaRow(val id: String, val chat: String, val kind: String, val localPath: String)
 
 /** Sealed (encrypted) key-value rows holding the Signal protocol state. */
 @Entity(tableName = "kv", primaryKeys = ["tbl", "k"])
@@ -305,6 +326,53 @@ interface MsgDao {
     @Query("DELETE FROM status_view")
     suspend fun clearStatusViews()
 
+    // ---- broadcast lists ----
+
+    @Query("SELECT * FROM broadcast_list ORDER BY created DESC")
+    fun broadcasts(): Flow<List<BroadcastList>>
+
+    @Query("SELECT * FROM broadcast_list WHERE id = :id")
+    suspend fun broadcast(id: String): BroadcastList?
+
+    @Query("SELECT * FROM broadcast_list WHERE id = :id")
+    fun broadcastFlow(id: String): Flow<BroadcastList?>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putBroadcast(b: BroadcastList)
+
+    @Query("DELETE FROM broadcast_list WHERE id = :id")
+    suspend fun deleteBroadcast(id: String)
+
+    // ---- polls ----
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putVote(v: PollVote)
+
+    @Query("SELECT * FROM poll_vote WHERE pollId = :pollId")
+    fun votes(pollId: String): Flow<List<PollVote>>
+
+    @Query("SELECT * FROM poll_vote WHERE pollId = :pollId AND voter = :voter")
+    suspend fun voteOf(pollId: String, voter: String): PollVote?
+
+    @Query("DELETE FROM poll_vote WHERE pollId = :pollId")
+    suspend fun deleteVotes(pollId: String)
+
+    // ---- devices of contacts ----
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putPeerDev(d: PeerDev)
+
+    @Query("SELECT devs FROM peer_dev WHERE phone = :phone")
+    suspend fun peerDevs(phone: String): String?
+
+    @Query("DELETE FROM messages WHERE chat = :chat")
+    suspend fun deleteChatMessages(chat: String)
+
+    // ---- storage ----
+
+    @Query("SELECT id, chat, kind, localPath FROM messages WHERE localPath != ''")
+    suspend fun mediaFiles(): List<MediaRow>
+
     // ---- profiles ----
 
     @Query("SELECT * FROM peer_profile")
@@ -444,7 +512,7 @@ interface MsgDao {
 }
 
 @Database(entities = [Msg::class, Contact::class, ChatGroup::class, Kv::class, Receipt::class, Reaction::class,
-    ChatState::class, Blocked::class, PeerProfile::class, StatusItem::class, StatusView::class], version = 14, exportSchema = false)
+    ChatState::class, Blocked::class, PeerProfile::class, StatusItem::class, StatusView::class, BroadcastList::class, PollVote::class, PeerDev::class], version = 16, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): MsgDao
 }
@@ -542,5 +610,27 @@ val MIGRATION_13_14 = object : Migration(13, 14) {
         db.execSQL("ALTER TABLE messages ADD COLUMN once INTEGER NOT NULL DEFAULT 0")
         db.execSQL("ALTER TABLE messages ADD COLUMN expiresAt INTEGER NOT NULL DEFAULT 0")
         db.execSQL("ALTER TABLE chat_state ADD COLUMN disappear INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+/** 14 -> 15: broadcast lists. */
+val MIGRATION_14_15 = object : Migration(14, 15) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS `broadcast_list` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `members` TEXT NOT NULL, " +
+            "`created` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+    }
+}
+
+/** 15 -> 16: join approval and communities (columns of chat_groups), polls, devices of contacts. */
+val MIGRATION_15_16 = object : Migration(15, 16) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE chat_groups ADD COLUMN approval INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE chat_groups ADD COLUMN requests TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE chat_groups ADD COLUMN parent TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE chat_groups ADD COLUMN community INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE chat_groups ADD COLUMN subs TEXT NOT NULL DEFAULT ''")
+        db.execSQL("CREATE TABLE IF NOT EXISTS `poll_vote` (`pollId` TEXT NOT NULL, `voter` TEXT NOT NULL, `choices` TEXT NOT NULL, " +
+            "`ts` INTEGER NOT NULL, PRIMARY KEY(`pollId`, `voter`))")
+        db.execSQL("CREATE TABLE IF NOT EXISTS `peer_dev` (`phone` TEXT NOT NULL, `devs` TEXT NOT NULL, PRIMARY KEY(`phone`))")
     }
 }

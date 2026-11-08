@@ -33,6 +33,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.paint
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -70,6 +71,7 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
     val listState = rememberLazyListState()
     var text by remember { mutableStateOf("") }
     var menu by remember { mutableStateOf(false) }
+    var pollDlg by remember { mutableStateOf(false) }
     var showSafety by remember { mutableStateOf(false) }
     var showGroup by remember { mutableStateOf(false) }
     var showContact by remember { mutableStateOf(false) }
@@ -79,7 +81,7 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
     var pendingGroupCall by remember { mutableStateOf<(() -> Unit)?>(null) }
     val askGroupCall = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
         if (res[Manifest.permission.RECORD_AUDIO] == true) pendingGroupCall?.invoke()
-        else Toast.makeText(ctx, "Microphone permission is needed for calls", Toast.LENGTH_SHORT).show()
+        else Toast.makeText(ctx, t("Microphone permission is needed for calls"), Toast.LENGTH_SHORT).show()
     }
     var dlg by remember { mutableIntStateOf(0) }     // 1 mute, 2 block / unblock, 3 report
     val cstate by dao.chatStateFlow(chat).collectAsState(initial = null)
@@ -102,7 +104,7 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
 
     val names = contacts.associate { it.phone to it.name }
     val group = groups.firstOrNull { it.gid == chat }
-    val title = if (isGroup(chat)) group?.name ?: "Group" else names[chat] ?: chat
+    val title = if (isGroup(chat)) group?.name ?: t("Group") else names[chat] ?: chat
     val me = app.prefs.phone
     val inGroup = !isGroup(chat) || group == null || group.members.split(",").contains(me)
     val adminsOnly = isGroup(chat) && group != null && group.announce && !group.isAdmin(me)
@@ -116,7 +118,7 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
             typers.size == 1 -> "${typers.first().let { names[it] ?: it }} is typing…"
             else -> "${typers.size} people are typing…"
         }
-        group != null && !canWrite -> "You are no longer in this group"
+        group != null && !canWrite -> t("You are no longer in this group")
         group != null -> "${group.members.split(",").size} members"
         !isGroup(chat) && presence?.phone == chat && presence?.hidden == false ->
             presence!!.let { if (it.online) "online" else it.lastSeen?.let { t -> "last seen " + lastSeenText(t) } ?: chat }
@@ -142,8 +144,8 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
             val lm = ctx.getSystemService(android.location.LocationManager::class.java)
             val provider = listOf(android.location.LocationManager.GPS_PROVIDER, android.location.LocationManager.NETWORK_PROVIDER)
                 .firstOrNull { lm.isProviderEnabled(it) }
-            if (provider == null) { Toast.makeText(ctx, "Turn on location on your phone", Toast.LENGTH_SHORT).show(); return }
-            Toast.makeText(ctx, "Finding your location…", Toast.LENGTH_SHORT).show()
+            if (provider == null) { Toast.makeText(ctx, t("Turn on location on your phone"), Toast.LENGTH_SHORT).show(); return }
+            Toast.makeText(ctx, t("Finding your location…"), Toast.LENGTH_SHORT).show()
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
             var done = false
             val listener = object : android.location.LocationListener {
@@ -167,17 +169,23 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                 try { lm.removeUpdates(listener) } catch (_: SecurityException) { }
                 @Suppress("MissingPermission")
                 val l = try { lm.getLastKnownLocation(provider) } catch (_: SecurityException) { null }
-                if (l != null) locationFound = l else Toast.makeText(ctx, "Could not find your location", Toast.LENGTH_SHORT).show()
+                if (l != null) locationFound = l else Toast.makeText(ctx, t("Could not find your location"), Toast.LENGTH_SHORT).show()
             }, 10_000L)
         } catch (_: SecurityException) { }
     }
     val locPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok) findLocation() else Toast.makeText(ctx, "Location permission is needed", Toast.LENGTH_SHORT).show()
+        if (ok) findLocation() else Toast.makeText(ctx, t("Location permission is needed"), Toast.LENGTH_SHORT).show()
     }
     // Photos and videos go through a preview screen (rotate, crop, caption) before they are sent.
     var preview by remember { mutableStateOf<List<android.net.Uri>?>(null) }
     var viewerId by remember { mutableStateOf<String?>(null) }
     val gallery by dao.mediaOf(chat).collectAsState(initial = emptyList())
+    val wp by app.client.wallpaper.collectAsState()
+    val wpTick by app.client.wallpaperTick.collectAsState()
+    val wpBmp by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, wp, wpTick) {
+        value = if (wp == "img") loadBitmap(app, app.client.wallpaperFile.absolutePath, 1600) else null
+    }
+    val wpColor = if (wp.startsWith("c:")) Color(wp.removePrefix("c:").toLong(16).toInt()) else null
     var onceMsg by remember { mutableStateOf<Msg?>(null) }
     var disDlg by remember { mutableStateOf(false) }
     SideEffect { ViewerBus.open = { viewerId = it }; ViewerBus.openOnce = { onceMsg = it } }
@@ -201,7 +209,7 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
         takePhoto.launch(u)
     }
     val camPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok) launchCamera() else Toast.makeText(ctx, "Camera permission is needed", Toast.LENGTH_SHORT).show()
+        if (ok) launchCamera() else Toast.makeText(ctx, t("Camera permission is needed"), Toast.LENGTH_SHORT).show()
     }
     fun startRec() {
         if (recorder.start(app.client.tmpDir)) { recording = true; elapsed = 0 }
@@ -280,12 +288,12 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
         val cur = cstate?.disappear ?: 0L
         AlertDialog(
             onDismissRequest = { disDlg = false },
-            title = { Text("Disappearing messages") },
+            title = { Text(t("Disappearing messages")) },
             text = {
                 Column {
                     Text("New messages in this chat are deleted after the chosen time, on both phones. Messages you star are kept.",
                         fontSize = 13.sp, color = Color.Gray, modifier = Modifier.padding(bottom = 8.dp))
-                    listOf(0L to "Off", 86_400L to "24 hours", 604_800L to "7 days", 7_776_000L to "90 days").forEach { (sec, label) ->
+                    listOf(0L to t("Off"), 86_400L to "24 hours", 604_800L to "7 days", 7_776_000L to "90 days").forEach { (sec, label) ->
                         Row(Modifier.fillMaxWidth().clickable { disDlg = false; app.client.setDisappear(chat, sec) },
                             verticalAlignment = Alignment.CenterVertically) {
                             RadioButton(selected = cur == sec, onClick = { disDlg = false; app.client.setDisappear(chat, sec) })
@@ -294,7 +302,7 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                     }
                 }
             },
-            confirmButton = {}, dismissButton = { TextButton(onClick = { disDlg = false }) { Text("Cancel") } }
+            confirmButton = {}, dismissButton = { TextButton(onClick = { disDlg = false }) { Text(t("Cancel")) } }
         )
     }
     viewerId?.let { id -> MediaViewer(app, gallery.filter { hasLocalFile(it) }, id) { viewerId = null } }
@@ -311,22 +319,22 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
         }
         Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 32.dp, top = 8.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                Tile("🖼", "Gallery", Color(0xFF7E57C2)) {
+                Tile("🖼", t("Gallery"), Color(0xFF7E57C2)) {
                     pickMedia.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                 }
-                Tile("📷", "Camera", Color(0xFFE91E63)) {
+                Tile("📷", t("Camera"), Color(0xFFE91E63)) {
                     if (ctx.checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                         launchCamera() else camPermission.launch(android.Manifest.permission.CAMERA)
                 }
-                Tile("📄", "Document", Color(0xFF3F51B5)) { pickFile.launch("*/*") }
+                Tile("📄", t("Document"), Color(0xFF3F51B5)) { pickFile.launch("*/*") }
             }
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                Tile("📍", "Location", Color(0xFF2E7D32)) {
+                Tile("📍", t("Location"), Color(0xFF2E7D32)) {
                     if (ctx.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED)
                         findLocation() else locPermission.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
                 }
-                Tile("👤", "Contact", Color(0xFF0288D1)) {
+                Tile("👤", t("Contact"), Color(0xFF0288D1)) {
                     pickContact.launch(android.content.Intent(android.content.Intent.ACTION_PICK,
                         android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI))
                 }
@@ -334,19 +342,22 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
             }
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                Tile("🙂", "Sticker", Color(0xFF8E24AA)) { pickSticker.launch("image/*") }
-                Spacer(Modifier.width(84.dp)); Spacer(Modifier.width(84.dp))
+                Tile("🙂", t("Sticker"), Color(0xFF8E24AA)) { pickSticker.launch("image/*") }
+                Tile("📊", t("Poll"), Color(0xFF00897B)) { pollDlg = true }
+                Spacer(Modifier.width(84.dp))
             }
         }
     }
 
+    if (pollDlg) PollDialog({ pollDlg = false }) { q, o, multi -> app.client.sendPoll(chat, q, o, multi); pollDlg = false }
+
     locationFound?.let { loc ->
         AlertDialog(
             onDismissRequest = { locationFound = null },
-            title = { Text("Send your location?") },
+            title = { Text(t("Send your location?")) },
             text = { Text("%.5f, %.5f\n\nThe person (or group) will see where you are right now.".format(java.util.Locale.US, loc.latitude, loc.longitude)) },
-            confirmButton = { TextButton(onClick = { app.client.sendLocation(chat, loc.latitude, loc.longitude); locationFound = null }) { Text("Send") } },
-            dismissButton = { TextButton(onClick = { locationFound = null }) { Text("Cancel") } }
+            confirmButton = { TextButton(onClick = { app.client.sendLocation(chat, loc.latitude, loc.longitude); locationFound = null }) { Text(t("Send")) } },
+            dismissButton = { TextButton(onClick = { locationFound = null }) { Text(t("Cancel")) } }
         )
     }
 
@@ -356,20 +367,20 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
         val others = (group?.members ?: "").split(",").filter { it.isNotEmpty() && it != me }
         AlertDialog(
             onDismissRequest = { infoMsg = null },
-            title = { Text("Message info") },
+            title = { Text(t("Message info")) },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     others.forEach { p ->
                         val s = st[p] ?: 0
                         Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(names[p] ?: p, Modifier.weight(1f))
-                            Text(when { s >= 3 -> "Read ✓✓"; s == 2 -> "Delivered ✓✓"; else -> "Waiting…" },
+                            Text(when { s >= 3 -> t("Read ✓✓"); s == 2 -> t("Delivered ✓✓"); else -> t("Waiting…") },
                                 color = if (s >= 3) Accent else Color.Gray, fontSize = 13.sp)
                         }
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { infoMsg = null }) { Text("Close") } }
+            confirmButton = { TextButton(onClick = { infoMsg = null }) { Text(t("Close")) } }
         )
     }
     if (showContact) {
@@ -382,11 +393,11 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                     Spacer(Modifier.height(8.dp))
                     Text(chat, color = Color.Gray, fontSize = 14.sp)
                     Spacer(Modifier.height(12.dp))
-                    Text("About", fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth())
-                    Text(peer?.about?.ifEmpty { null } ?: "No about text yet.", modifier = Modifier.fillMaxWidth())
+                    Text(t("About"), fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth())
+                    Text(peer?.about?.ifEmpty { null } ?: t("No about text yet."), modifier = Modifier.fillMaxWidth())
                 }
             },
-            confirmButton = { TextButton(onClick = { showContact = false }) { Text("Close") } }
+            confirmButton = { TextButton(onClick = { showContact = false }) { Text(t("Close")) } }
         )
     }
 
@@ -394,19 +405,19 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
         val number by produceState<String?>(null, chat) { value = app.client.safetyNumber(chat) }
         AlertDialog(
             onDismissRequest = { showSafety = false },
-            title = { Text("🔒 End-to-end encrypted") },
+            title = { Text(t("🔒 End-to-end encrypted")) },
             text = {
                 Column {
                     Text("Messages and files in this chat are encrypted on your phone. Only you and the other person can read them.")
                     Spacer(Modifier.height(12.dp))
-                    Text("Safety number", fontWeight = FontWeight.Bold)
-                    Text(number ?: "Send a message first to create a secure session.", fontSize = 16.sp)
+                    Text(t("Safety number"), fontWeight = FontWeight.Bold)
+                    Text(number ?: t("Send a message first to create a secure session."), fontSize = 16.sp)
                     Spacer(Modifier.height(8.dp))
                     Text("Compare this number with the other person, in person or over a call. If it matches, nobody is intercepting your chat. If it ever changes you will see a warning here.",
                         fontSize = 12.sp, color = Color.Gray)
                 }
             },
-            confirmButton = { TextButton(onClick = { showSafety = false }) { Text("Close") } }
+            confirmButton = { TextButton(onClick = { showSafety = false }) { Text(t("Close")) } }
         )
     }
 
@@ -426,20 +437,20 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                             }
                         }
                     }
-                    if (!gone) ActionItem(if (m.starred) "Unstar" else "Star") { actionMsg = null; app.client.star(m, !m.starred) }
-                    if (!gone && canWrite) ActionItem("Reply") { actionMsg = null; replyTo = m; editing = null }
-                    if (!gone && m.kind == "text") ActionItem("Copy") {
+                    if (!gone) ActionItem(if (m.starred) t("Unstar") else t("Star")) { actionMsg = null; app.client.star(m, !m.starred) }
+                    if (!gone && canWrite) ActionItem(t("Reply")) { actionMsg = null; replyTo = m; editing = null }
+                    if (!gone && m.kind == "text") ActionItem(t("Copy")) {
                         actionMsg = null
                         val cm = ctx.getSystemService(ClipboardManager::class.java)
                         cm?.setPrimaryClip(ClipData.newPlainText("Sky message", m.body))
-                        Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(ctx, t("Copied"), Toast.LENGTH_SHORT).show()
                     }
-                    if (!gone && m.once == 0) ActionItem("Forward") { actionMsg = null; forwardMsg = m }
+                    if (!gone && m.once == 0) ActionItem(t("Forward")) { actionMsg = null; forwardMsg = m }
                     if (!gone && m.fromMe && m.kind == "text" && fresh && canWrite) ActionItem("Edit") {
                         actionMsg = null; editing = m; replyTo = null; text = m.body
                     }
-                    if (!gone && m.fromMe && isGroup(chat)) ActionItem("Info") { actionMsg = null; infoMsg = m }
-                    ActionItem("Delete", Color.Red) { actionMsg = null; deleteMsg = m }
+                    if (!gone && m.fromMe && isGroup(chat)) ActionItem(t("Info")) { actionMsg = null; infoMsg = m }
+                    ActionItem(t("Delete"), Color.Red) { actionMsg = null; deleteMsg = m }
                 }
             }
         )
@@ -450,18 +461,18 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
             System.currentTimeMillis() - m.ts < 48L * 3600 * 1000
         AlertDialog(
             onDismissRequest = { deleteMsg = null },
-            title = { Text("Delete message?") },
+            title = { Text(t("Delete message?")) },
             text = { if (everyone) Text("\"Delete for everyone\" replaces it with \"Message deleted\" for the other person(s) " +
                 "if they use a Sky version that supports it.") },
             confirmButton = {
                 Column(horizontalAlignment = Alignment.End) {
                     if (everyone) TextButton(onClick = { deleteMsg = null; app.client.deleteForEveryone(m) }) {
-                        Text("Delete for everyone", color = Color.Red)
+                        Text(t("Delete for everyone"), color = Color.Red)
                     }
                     TextButton(onClick = { deleteMsg = null; app.client.deleteForMe(m) }) {
-                        Text("Delete for me", color = Color.Red)
+                        Text(t("Delete for me"), color = Color.Red)
                     }
-                    TextButton(onClick = { deleteMsg = null }) { Text("Cancel") }
+                    TextButton(onClick = { deleteMsg = null }) { Text(t("Cancel")) }
                 }
             }
         )
@@ -472,10 +483,10 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
             contacts.filter { it.phone != me }.map { it.phone to it.name.ifEmpty { it.phone } }
         AlertDialog(
             onDismissRequest = { forwardMsg = null },
-            title = { Text("Forward to…") },
+            title = { Text(t("Forward to…")) },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
-                    if (targets.isEmpty()) Text("No chats yet.", color = Color.Gray)
+                    if (targets.isEmpty()) Text(t("No chats yet."), color = Color.Gray)
                     targets.forEach { (id, label) ->
                         TextButton(onClick = {
                             forwardMsg = null
@@ -486,7 +497,7 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { forwardMsg = null }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { forwardMsg = null }) { Text(t("Cancel")) } }
         )
     }
 
@@ -513,7 +524,7 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("Back"))
                     }
                 },
                 actions = {
@@ -534,16 +545,16 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                     Box {
                         IconButton(onClick = { topMenu = true }) { Text("⋮", color = Color.White, fontSize = 20.sp) }
                         DropdownMenu(expanded = topMenu, onDismissRequest = { topMenu = false }) {
-                            DropdownMenuItem(text = { Text("Disappearing messages" + if ((cstate?.disappear ?: 0L) > 0) " ⏱" else "") },
+                            DropdownMenuItem(text = { Text(t("Disappearing messages") + if ((cstate?.disappear ?: 0L) > 0) " ⏱" else "") },
                                 onClick = { topMenu = false; disDlg = true })
-                            DropdownMenuItem(text = { Text("Media and documents") },
+                            DropdownMenuItem(text = { Text(t("Media and documents")) },
                                 onClick = { topMenu = false; onMedia() })
-                            DropdownMenuItem(text = { Text(if (isMuted) "Unmute notifications" else "Mute notifications") },
+                            DropdownMenuItem(text = { Text(if (isMuted) t("Unmute notifications") else t("Mute notifications")) },
                                 onClick = { topMenu = false; if (isMuted) app.client.setMuted(chat, 0) else dlg = 1 })
                             if (!isGroup(chat)) {
-                                DropdownMenuItem(text = { Text(if (iBlocked) "Unblock" else "Block") },
+                                DropdownMenuItem(text = { Text(if (iBlocked) t("Unblock") else t("Block")) },
                                     onClick = { topMenu = false; dlg = 2 })
-                                DropdownMenuItem(text = { Text("Report") },
+                                DropdownMenuItem(text = { Text(t("Report")) },
                                     onClick = { topMenu = false; dlg = 3 })
                             }
                         }
@@ -555,7 +566,9 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
             )
         }
     ) { pad ->
-        Column(Modifier.fillMaxSize().padding(pad).background(Sky.chatBg).imePadding()) {
+        Column(Modifier.fillMaxSize().padding(pad)    .background(wpColor ?: Sky.chatBg)
+        .then(if (wpBmp != null) Modifier.paint(androidx.compose.ui.graphics.painter.BitmapPainter(wpBmp!!), contentScale = ContentScale.Crop) else Modifier)
+        .imePadding()) {
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(), state = listState,
                 contentPadding = PaddingValues(8.dp),
@@ -597,10 +610,10 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         if (ed != null) {
-                            Text("Editing message", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Sky.accentText)
+                            Text(t("Editing message"), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Sky.accentText)
                             Text(ed.body, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color.Gray, fontSize = 13.sp)
                         } else if (r != null) {
-                            Text("Replying to " + (if (r.fromMe) "yourself" else names[r.sender] ?: r.sender),
+                            Text(t("Replying to ") + (if (r.fromMe) "yourself" else names[r.sender] ?: r.sender),
                                 fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Sky.accentText)
                             Text(com.skychat.app.data.previewText(r.kind, r.body, r.fname), maxLines = 1,
                                 overflow = TextOverflow.Ellipsis, color = Color.Gray, fontSize = 13.sp)
@@ -610,14 +623,14 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                 }
             }
             if (!canWrite) {
-                Text(if (adminsOnly && inGroup) "Only admins can send messages in this group."
-                     else "You can't send messages because you are no longer in this group.",
+                Text(if (adminsOnly && inGroup) t("Only admins can send messages in this group.")
+                     else t("You can't send messages because you are no longer in this group."),
                     Modifier.fillMaxWidth().padding(16.dp), color = Color.Gray, fontSize = 13.sp)
             } else if (iBlocked) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Text("You blocked $title.", Modifier.weight(1f), color = Color.Gray, fontSize = 13.sp)
-                    TextButton(onClick = { app.client.setBlocked(chat, false) }) { Text("Unblock") }
+                    TextButton(onClick = { app.client.setBlocked(chat, false) }) { Text(t("Unblock")) }
                 }
             } else Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (recording) {
@@ -630,7 +643,7 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                     IconButton(onClick = { menu = true }) { Text("📎", fontSize = 22.sp) }
                     OutlinedTextField(
                         text, { text = it }, modifier = Modifier.weight(1f),
-                        placeholder = { Text("Message") },
+                        placeholder = { Text(t("Message")) },
                         shape = RoundedCornerShape(24.dp), maxLines = 5,
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedContainerColor = Sky.surface, unfocusedContainerColor = Sky.surface,
@@ -666,7 +679,7 @@ fun ChatScreen(app: SkyApp, chat: String, onMedia: () -> Unit = {}, onBack: () -
                     containerColor = Accent, contentColor = Color.White, shape = CircleShape
                 ) {
                     if (recording || text.isNotBlank())
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = t("Send"))
                     else Text("🎤", fontSize = 22.sp)
                 }
             }
@@ -698,17 +711,17 @@ private fun GroupInfoDialog(app: SkyApp, group: ChatGroup, names: Map<String, St
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
                     Avatar(app, group.photoPath, 96.dp)
                     if (iAmAdmin) Row {
-                        TextButton(onClick = { pick.launch("image/*") }) { Text(if (group.photoPath.isEmpty()) "Add photo" else "Change photo") }
+                        TextButton(onClick = { pick.launch("image/*") }) { Text(if (group.photoPath.isEmpty()) t("Add photo") else t("Change photo")) }
                         if (group.photoPath.isNotEmpty())
-                            TextButton(onClick = { app.client.setGroupInfo(group.gid, null, null, true) }) { Text("Remove", color = Color.Red) }
+                            TextButton(onClick = { app.client.setGroupInfo(group.gid, null, null, true) }) { Text(t("Remove"), color = Color.Red) }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
                 if (iAmAdmin) {
                     OutlinedTextField(descr, { if (it.length <= 500) descr = it }, Modifier.fillMaxWidth(),
-                        label = { Text("Description") }, supportingText = { Text("${descr.length}/500") })
+                        label = { Text(t("Description")) }, supportingText = { Text("${descr.length}/500") })
                     TextButton(enabled = descr.trim() != group.descr,
-                        onClick = { app.client.setGroupInfo(group.gid, descr, null, false) }) { Text("Save description") }
+                        onClick = { app.client.setGroupInfo(group.gid, descr, null, false) }) { Text(t("Save description")) }
                 } else if (group.descr.isNotEmpty()) {
                     Text(group.descr, fontSize = 14.sp)
                 }
@@ -716,28 +729,48 @@ private fun GroupInfoDialog(app: SkyApp, group: ChatGroup, names: Map<String, St
                 Spacer(Modifier.height(8.dp))
                 if (iAmAdmin) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Only admins can send messages", Modifier.weight(1f))
+                        Text(t("Only admins can send messages"), Modifier.weight(1f))
                         Switch(group.announce, { app.client.setAnnounce(group.gid, it) })
                     }
-                    TextButton(onClick = { showInvite = true; app.client.requestInvite(group.gid) }) { Text("Invite link") }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(t("Approve new members"), Modifier.weight(1f))
+                        Switch(group.approval, { app.client.setApproval(group.gid, it) })
+                    }
+                    val reqs = remember(group.requests) {
+                        try {
+                            val a = org.json.JSONArray(group.requests.ifEmpty { "[]" })
+                            (0 until a.length()).map { a.getJSONObject(it).let { r -> r.getString("p") to r.optString("n") } }
+                        } catch (e: Exception) { emptyList() }
+                    }
+                    if (reqs.isNotEmpty()) {
+                        Text(t("Waiting to join") + " (${reqs.size})", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        reqs.forEach { (p, n) ->
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(n.ifEmpty { p }, Modifier.weight(1f))
+                                TextButton(onClick = { app.client.answerJoin(group.gid, p, true) }) { Text(t("Accept")) }
+                                TextButton(onClick = { app.client.answerJoin(group.gid, p, false) }) { Text(t("Refuse")) }
+                            }
+                        }
+                    }
+                    TextButton(onClick = { showInvite = true; app.client.requestInvite(group.gid) }) { Text(t("Invite link")) }
                 } else if (group.announce) {
-                    Text("Only admins can send messages.", fontSize = 13.sp, color = Color.Gray)
+                    Text(t("Only admins can send messages."), fontSize = 13.sp, color = Color.Gray)
                 }
                 Text("${members.size} members", color = Color.Gray, fontSize = 13.sp)
                 Spacer(Modifier.height(8.dp))
                 members.forEach { p ->
                     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text((if (p == me) "You" else names[p] ?: p) + if (p == group.owner) "  · owner" else if (group.isAdmin(p)) "  · admin" else "")
+                            Text((if (p == me) t("You") else names[p] ?: p) + if (p == group.owner) "  · owner" else if (group.isAdmin(p)) "  · admin" else "")
                             if (p != me && names[p] != null) Text(p, fontSize = 12.sp, color = Color.Gray)
                         }
                         if (iAmAdmin && p != me && p != group.owner)
                             TextButton(onClick = { app.client.setAdmin(group.gid, p, !group.isAdmin(p)) }) {
-                                Text(if (group.isAdmin(p)) "Dismiss admin" else "Make admin")
+                                Text(if (group.isAdmin(p)) t("Dismiss admin") else t("Make admin"))
                             }
                         if (p != me && (iAmOwner || (iAmAdmin && !group.isAdmin(p))))
                             TextButton(onClick = { app.client.removeMember(group.gid, p) }) {
-                                Text("Remove", color = Color.Red)
+                                Text(t("Remove"), color = Color.Red)
                             }
                     }
                 }
@@ -748,14 +781,14 @@ private fun GroupInfoDialog(app: SkyApp, group: ChatGroup, names: Map<String, St
                     TextButton(
                         enabled = newPhone.trim().startsWith("+") && newPhone.trim().length >= 8,
                         onClick = { app.client.addMembers(group.gid, listOf(newPhone.trim())); newPhone = "" }
-                    ) { Text("Add") }
+                    ) { Text(t("Add")) }
                 }
             }
         },
         confirmButton = {
-            if (isMember) TextButton(onClick = { confirmLeave = true }) { Text("Leave group", color = Color.Red) }
+            if (isMember) TextButton(onClick = { confirmLeave = true }) { Text(t("Leave group"), color = Color.Red) }
         },
-        dismissButton = { TextButton(onClick = onClose) { Text("Close") } }
+        dismissButton = { TextButton(onClick = onClose) { Text(t("Close")) } }
     )
     if (showInvite) {
         val code = app.client.invites.collectAsState().value[group.gid]
@@ -763,10 +796,10 @@ private fun GroupInfoDialog(app: SkyApp, group: ChatGroup, names: Map<String, St
         val ctx = LocalContext.current
         AlertDialog(
             onDismissRequest = { showInvite = false },
-            title = { Text("Invite link") },
+            title = { Text(t("Invite link")) },
             text = {
                 Column {
-                    Text(link ?: "Getting the link…", fontSize = 15.sp)
+                    Text(link ?: t("Getting the link…"), fontSize = 15.sp)
                     Spacer(Modifier.height(8.dp))
                     Text("Anyone who has this link can join the group. Reset it to make the old link stop working.",
                         fontSize = 12.sp, color = Color.Gray)
@@ -780,18 +813,18 @@ private fun GroupInfoDialog(app: SkyApp, group: ChatGroup, names: Map<String, St
                             putExtra(android.content.Intent.EXTRA_TEXT, "Join my group \"${group.name}\" on Sky: $link\nCode: $code")
                         }
                         ctx.startActivity(android.content.Intent.createChooser(send, null))
-                    }) { Text("Share") }
+                    }) { Text(t("Share")) }
                     TextButton(enabled = link != null, onClick = {
                         (ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
                             .setPrimaryClip(android.content.ClipData.newPlainText("invite", link))
-                        Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
-                    }) { Text("Copy") }
+                        Toast.makeText(ctx, t("Copied"), Toast.LENGTH_SHORT).show()
+                    }) { Text(t("Copy")) }
                 }
             },
             dismissButton = {
                 Row {
-                    TextButton(onClick = { app.client.requestInvite(group.gid, reset = true) }) { Text("Reset") }
-                    TextButton(onClick = { showInvite = false }) { Text("Close") }
+                    TextButton(onClick = { app.client.requestInvite(group.gid, reset = true) }) { Text(t("Reset")) }
+                    TextButton(onClick = { showInvite = false }) { Text(t("Close")) }
                 }
             }
         )
@@ -800,14 +833,14 @@ private fun GroupInfoDialog(app: SkyApp, group: ChatGroup, names: Map<String, St
         AlertDialog(
             onDismissRequest = { confirmLeave = false },
             title = { Text("Leave \"${group.name}\"?") },
-            text = { Text("You will no longer receive messages from this group." +
+            text = { Text(t("You will no longer receive messages from this group.") +
                 if (iAmOwner) " Someone else becomes the owner." else "") },
             confirmButton = {
                 TextButton(onClick = { app.client.leaveGroup(group.gid); confirmLeave = false; onClose() }) {
-                    Text("Leave", color = Color.Red)
+                    Text(t("Leave"), color = Color.Red)
                 }
             },
-            dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text(t("Cancel")) } }
         )
     }
 }
@@ -840,13 +873,13 @@ private fun Bubble(
                 if (senderName != null)
                     Text(senderName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Sky.accentText)
                 if (m.fwd && m.kind != "deleted")
-                    Text("↪ Forwarded", fontSize = 11.sp, fontStyle = FontStyle.Italic, color = Color.Gray)
+                    Text(t("↪ Forwarded"), fontSize = 11.sp, fontStyle = FontStyle.Italic, color = Color.Gray)
                 if (m.replyId.isNotEmpty() && m.kind != "deleted") {
                     Row(Modifier.padding(vertical = 3.dp).clip(RoundedCornerShape(6.dp))
                         .background(Sky.divider).clickable { onQuote(m.replyId) }) {
                         Box(Modifier.width(3.dp).height(36.dp).background(Sky.accentText))
                         Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp)) {
-                            Text(if (m.quoteBy == me) "You" else names[m.quoteBy] ?: m.quoteBy,
+                            Text(if (m.quoteBy == me) t("You") else names[m.quoteBy] ?: m.quoteBy,
                                 fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Sky.accentText, maxLines = 1)
                             Text(m.quote, fontSize = 12.sp, color = Color.DarkGray, maxLines = 2,
                                 overflow = TextOverflow.Ellipsis)
@@ -855,7 +888,7 @@ private fun Bubble(
                 }
                 if (m.kind == "deleted") {
                     Row(verticalAlignment = Alignment.Bottom) {
-                        Text(if (m.fromMe) "🚫 You deleted this message" else "🚫 This message was deleted",
+                        Text(if (m.fromMe) t("🚫 You deleted this message") else t("🚫 This message was deleted"),
                             fontStyle = FontStyle.Italic, color = Color.Gray, modifier = Modifier.weight(1f, fill = false))
                         Spacer(Modifier.width(8.dp))
                         Text(timeText(m.ts), fontSize = 11.sp, color = Color.Gray)
@@ -932,7 +965,7 @@ private fun MediaContent(m: Msg, app: SkyApp) {
     val ctx = LocalContext.current
     val hasLocal = m.localPath.isNotEmpty() && File(m.localPath).exists()
     if (m.once != 0 && (m.kind == "image" || m.kind == "video")) {
-        val what = if (m.kind == "image") "Photo" else "Video"
+        val what = if (m.kind == "image") t("Photo") else "Video"
         when {
             m.once == 2 -> Text("🔥 $what · Opened", color = Color.Gray)
             m.fromMe -> Text("🔥 $what · View once · not opened yet", color = Color.Gray)
@@ -948,14 +981,14 @@ private fun MediaContent(m: Msg, app: SkyApp) {
                 if (m.mime == "image/gif") GifImage(app, m.localPath) { ViewerBus.open(m.id) }
                 else ImageThumb(app, m.localPath) { ViewerBus.open(m.id) }
             }
-            else Text("📷 Photo · tap to download", color = Color.Gray,
+            else Text(t("📷 Photo · tap to download"), color = Color.Gray,
                 modifier = Modifier.clickable { app.client.fetch(m) })
 
         "video" ->
             if (hasLocal) Box(Modifier.clickable { ViewerBus.open(m.id) }) {
                 MsgThumb(app, m, Modifier.size(width = 220.dp, height = 160.dp).clip(RoundedCornerShape(8.dp)), ContentScale.Crop)
                 Text(sizeText(m.size), Modifier.align(Alignment.BottomStart).padding(6.dp), color = Color.White, fontSize = 11.sp)
-            } else Text("🎥 Video · " + sizeText(m.size) + " · tap to download", color = Color.Gray,
+            } else Text(t("🎥 Video · ") + sizeText(m.size) + " · tap to download", color = Color.Gray,
                 modifier = Modifier.clickable { app.client.fetch(m) })
 
         "audio" -> {
@@ -980,6 +1013,8 @@ private fun MediaContent(m: Msg, app: SkyApp) {
             }
         }
 
+        "poll" -> PollBubble(app, m)
+
         "location" -> {
             val parts = m.body.split(",")
             val lat = parts.getOrNull(0)?.toDoubleOrNull(); val lon = parts.getOrNull(1)?.toDoubleOrNull()
@@ -987,11 +1022,11 @@ private fun MediaContent(m: Msg, app: SkyApp) {
                 if (lat != null && lon != null) try {
                     ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
                         android.net.Uri.parse("geo:$lat,$lon?q=$lat,$lon(Location)")))
-                } catch (_: Exception) { Toast.makeText(ctx, "No maps app found", Toast.LENGTH_SHORT).show() }
+                } catch (_: Exception) { Toast.makeText(ctx, t("No maps app found"), Toast.LENGTH_SHORT).show() }
             }) {
-                Text("📍 Location", fontWeight = FontWeight.Medium)
+                Text(t("📍 Location"), fontWeight = FontWeight.Medium)
                 Text(m.body.replace(",", ", "), fontSize = 12.sp, color = Color.Gray)
-                Text("Tap to open in Maps", fontSize = 12.sp, color = Sky.accentText)
+                Text(t("Tap to open in Maps"), fontSize = 12.sp, color = Sky.accentText)
             }
         }
 
@@ -1000,29 +1035,29 @@ private fun MediaContent(m: Msg, app: SkyApp) {
             val name = j.optString("n"); val number = j.optString("p")
             val e164 = remember(number) { app.client.toE164(number) }
             Column {
-                Text("👤 " + name.ifEmpty { "Contact" }, fontWeight = FontWeight.Medium)
+                Text("👤 " + name.ifEmpty { t("Contact") }, fontWeight = FontWeight.Medium)
                 Text(number, fontSize = 13.sp, color = Color.Gray)
                 Row {
-                    if (e164 != null) TextButton(onClick = { ChatNav.open(e164) }) { Text("Message") }
+                    if (e164 != null) TextButton(onClick = { ChatNav.open(e164) }) { Text(t("Message")) }
                     TextButton(onClick = {
                         ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_INSERT, android.provider.ContactsContract.Contacts.CONTENT_URI)
                             .putExtra(android.provider.ContactsContract.Intents.Insert.NAME, name)
                             .putExtra(android.provider.ContactsContract.Intents.Insert.PHONE, number))
-                    }) { Text("Save") }
+                    }) { Text(t("Save")) }
                 }
             }
         }
 
         "sticker" ->
             if (hasLocal) ImageThumb(app, m.localPath) { ViewerBus.open(m.id) }
-            else Text("🙂 Sticker · tap to download", color = Color.Gray, modifier = Modifier.clickable { app.client.fetch(m) })
+            else Text(t("🙂 Sticker · tap to download"), color = Color.Gray, modifier = Modifier.clickable { app.client.fetch(m) })
 
         "call", "info" -> Text(m.body, color = Color.DarkGray)
 
         else -> Column(Modifier.clickable {
             if (hasLocal) openFile(ctx, app.media, m.localPath, m.mime, m.fname) else app.client.fetch(m)
         }) {
-            Text("📎 " + m.fname.ifEmpty { "File" }, fontWeight = FontWeight.Medium)
+            Text("📎 " + m.fname.ifEmpty { t("File") }, fontWeight = FontWeight.Medium)
             Text(sizeText(m.size) + if (hasLocal) " · tap to open" else " · tap to download",
                 fontSize = 12.sp, color = Color.Gray)
         }
@@ -1050,7 +1085,7 @@ private fun ImageThumb(app: SkyApp, path: String, onClick: () -> Unit) {
     val b = bmp
     if (b != null) {
         Image(
-            bitmap = b, contentDescription = "Photo", contentScale = ContentScale.Fit,
+            bitmap = b, contentDescription = t("Photo"), contentScale = ContentScale.Fit,
             modifier = Modifier.widthIn(max = 240.dp).heightIn(max = 320.dp)
                 .clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick)
         )
@@ -1080,7 +1115,7 @@ private fun durText(ms: Int): String {
     return "${s / 60}:${"%02d".format(s % 60)}"
 }
 
-private fun sizeText(b: Long): String = when {
+fun sizeText(b: Long): String = when {
     b < 1024 -> "$b B"
     b < 1024 * 1024 -> "${b / 1024} KB"
     else -> "%.1f MB".format(b / 1024.0 / 1024.0)

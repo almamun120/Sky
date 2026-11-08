@@ -1,0 +1,15 @@
+# Example Prometheus setup. Run Prometheus on the SAME machine as the Sky server (/metrics is not reachable from outside).
+# 1. In config/sys.config set {metrics_token, <<"a long random text">>} and put the same text in the file named below.
+# 2. prometheus --config.file=deploy/prometheus.yml
+global:
+  scrape_interval: 15s
+rule_files:
+  - sky_alerts.yml
+scrape_configs:
+  - job_name: sky
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/sky_token
+    static_configs:
+      - targets: ["127.0.0.1:4080"]

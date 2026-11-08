@@ -1,7 +1,7 @@
 """Block and report: a blocked sender is acknowledged but never delivered; calls ring into the void;
 typing and online status are hidden both ways; the block list survives reconnects; reports are stored."""
 import asyncio, json, random, base64, websockets
-HOST="ws://127.0.0.1:8080"
+HOST="ws://127.0.0.1:4080"
 b64=lambda b: base64.b64encode(b).decode()
 async def jrx(ws,t=3): return json.loads(await asyncio.wait_for(ws.recv(),t))
 async def until(ws,typ,t=3,**match):

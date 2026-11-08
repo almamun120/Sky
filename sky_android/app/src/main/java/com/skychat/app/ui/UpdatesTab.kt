@@ -52,16 +52,16 @@ fun UpdatesTab(app: SkyApp, titleOf: (String) -> String, photoOf: Map<String, St
                 Avatar(app, myPhoto, 52.dp, version = ver)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("My status", fontWeight = FontWeight.Medium)
-                    Text(if (mine.isEmpty()) "Tap to add a status update" else "${mine.size} update(s) · ${timeText(mine.last().ts)}",
+                    Text(t("My status"), fontWeight = FontWeight.Medium)
+                    Text(if (mine.isEmpty()) t("Tap to add a status update") else "${mine.size} update(s) · ${timeText(mine.last().ts)}",
                         color = Color.Gray, fontSize = 13.sp)
                 }
                 TextButton(onClick = { composeText = true }) { Text("✏", fontSize = 20.sp) }
                 TextButton(onClick = { pick.launch("image/*") }) { Text("📷", fontSize = 20.sp) }
             }
             HorizontalDivider(color = Sky.divider)
-            Text("Recent updates", Modifier.padding(16.dp, 12.dp, 16.dp, 4.dp), color = Color.Gray, fontSize = 13.sp)
-            if (groups.isEmpty()) Text("No updates yet. People you chat with will appear here.",
+            Text(t("Recent updates"), Modifier.padding(16.dp, 12.dp, 16.dp, 4.dp), color = Color.Gray, fontSize = 13.sp)
+            if (groups.isEmpty()) Text(t("No updates yet. People you chat with will appear here."),
                 Modifier.padding(16.dp), color = Color.Gray)
         }
         items(groups.toList(), key = { it.key }) { g ->
@@ -94,7 +94,7 @@ private fun TextStatusComposer(onClose: () -> Unit, onPost: (String, Int) -> Uni
         Box(Modifier.fillMaxSize().background(Color(StatusColors[ci]))) {
             TextField(text, { if (it.length <= 700) text = it },
                 Modifier.align(Alignment.Center).fillMaxWidth().padding(24.dp),
-                placeholder = { Text("Type a status", color = Color(0xAAFFFFFF), fontSize = 28.sp, textAlign = TextAlign.Center) },
+                placeholder = { Text(t("Type a status"), color = Color(0xAAFFFFFF), fontSize = 28.sp, textAlign = TextAlign.Center) },
                 textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 28.sp, textAlign = TextAlign.Center),
                 colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
                     focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent, cursorColor = Color.White))
@@ -107,7 +107,7 @@ private fun TextStatusComposer(onClose: () -> Unit, onPost: (String, Int) -> Uni
                     }
                 }
                 Button(onClick = { onPost(text, StatusColors[ci]) }, enabled = text.isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent)) { Text("Post") }
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent)) { Text(t("Post")) }
             }
         }
     }
@@ -145,14 +145,14 @@ private fun StatusViewer(app: SkyApp, items: List<StatusItem>, name: String, onC
                 }
                 Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     TextButton(onClick = onClose) { Text("←", color = Color.White, fontSize = 22.sp) }
-                    Text(if (s.mine) "My status" else name, color = Color.White, fontWeight = FontWeight.Medium)
+                    Text(if (s.mine) t("My status") else name, color = Color.White, fontWeight = FontWeight.Medium)
                     Text("  ${timeText(s.ts)}", color = Color(0xCCFFFFFF), fontSize = 13.sp)
                 }
             }
             if (s.mine) Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Text("👁 ${views.size}", color = Color.White, modifier = Modifier.weight(1f))
-                TextButton(onClick = { app.client.deleteStatus(s.id); onClose() }) { Text("🗑 Delete", color = Color.White) }
+                TextButton(onClick = { app.client.deleteStatus(s.id); onClose() }) { Text(t("🗑 Delete"), color = Color.White) }
             }
         }
     }

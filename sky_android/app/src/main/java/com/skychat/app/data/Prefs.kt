@@ -3,6 +3,7 @@ package com.skychat.app.data
 import android.content.Context
 import android.util.Base64
 import com.skychat.app.crypto.Vault
+import com.skychat.app.net.ServerUrl
 
 /**
  * Settings. The login token and phone number are stored sealed by the Android Keystore [Vault]
@@ -47,10 +48,18 @@ class Prefs(ctx: Context, private val vault: Vault = Vault()) {
         slot.value = v; slot.loaded = true
     }
 
-    // 10.0.2.2 = host machine as seen from the Android emulator
+    /** The server address as set by the person (same in debug and release). Normally wss://… ; see [ServerUrl]. */
     var serverUrl: String
         get() = sp.getString("server", "wss://chat.example.com/ws")!!
-        set(v) = sp.edit().putString("server", v).apply()
+        set(v) = sp.edit().putString("server", ServerUrl.normalize(v)).apply()
+
+    /** true while the chat connection uses the ws:// fallback because wss:// could not connect. Not stored. */
+    @Volatile var useFallback = false
+    /** Same for the push channel (it connects on its own). */
+    @Volatile var pushFallback = false
+    /** The address the chat connection, uploads and downloads use right now: [serverUrl], or its ws:// fallback. */
+    val effectiveUrl: String
+        get() = if (useFallback) ServerUrl.fallback(serverUrl) ?: serverUrl else serverUrl
     var token: String?
         get() = get(tokenSlot, "token")
         set(v) = set(tokenSlot, "token", v)
@@ -70,6 +79,18 @@ class Prefs(ctx: Context, private val vault: Vault = Vault()) {
     var profileDirty: Boolean
         get() = sp.getBoolean("profileDirty", false)
         set(v) = sp.edit().putBoolean("profileDirty", v).apply()
+    /** Text size factor (0.85 small ... 1.3 huge). */
+    var fontScale: Float
+        get() = sp.getFloat("fontScale", 1f)
+        set(v) = sp.edit().putFloat("fontScale", v).apply()
+    /** "system", "en" or "bn". */
+    var lang: String
+        get() = sp.getString("lang", "system") ?: "system"
+        set(v) = sp.edit().putString("lang", v).apply()
+    /** Chat background: "" = default, "c:AARRGGBB" = a colour, "img" = my own picture. */
+    var wallpaper: String
+        get() = sp.getString("wallpaper", "") ?: ""
+        set(v) = sp.edit().putString("wallpaper", v).apply()
     /** Two-step verification PIN is on for my number (as the server last told me). */
     var pinOn: Boolean
         get() = sp.getBoolean("pinOn", false)
@@ -94,7 +115,7 @@ class Prefs(ctx: Context, private val vault: Vault = Vault()) {
     var lastContactSync: Long
         get() = sp.getLong("lastContactSync", 0)
         set(v) = sp.edit().putLong("lastContactSync", v).apply()
-    /** Debug: ask for the JSON text format instead of MessagePack. */
+    /** Ask for the JSON text format instead of MessagePack (the fallback format; MessagePack is the default). */
     var preferJson: Boolean
         get() = sp.getBoolean("preferJson", false)
         set(v) = sp.edit().putBoolean("preferJson", v).apply()
@@ -109,7 +130,7 @@ class Prefs(ctx: Context, private val vault: Vault = Vault()) {
 
     /** Own push channel: same host as the chat socket, path /push. */
     val pushUrl: String
-        get() = serverUrl.trim().let { if (it.endsWith("/ws")) it.dropLast(3) + "/push" else it.trimEnd('/') + "/push" }
+        get() = (if (pushFallback) ServerUrl.fallback(serverUrl) ?: serverUrl else serverUrl).trim().let { if (it.endsWith("/ws")) it.dropLast(3) + "/push" else it.trimEnd('/') + "/push" }
 
     /** Share my online status / last seen (reciprocal: if off, I cannot see others' either). Server keeps the truth. */
     var sharePresence: Boolean

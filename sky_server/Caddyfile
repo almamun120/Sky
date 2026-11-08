@@ -1,23 +1,51 @@
 # TLS in front of the Erlang server. Caddy gets and renews a free certificate by itself.
-# The app talks to  wss://YOUR-DOMAIN/ws  and derives everything else from that address:
-#   /ws        the chat connection (WebSocket)
-#   /push      the wake-up channel (WebSocket)
-#   /upload    encrypted file upload (HTTPS)
-#   /media/*   encrypted file download (HTTPS)
-# One reverse_proxy line carries all four; Caddy upgrades the WebSocket connections on its own.
+# Everything is based on TLS:
+#   443 (https / wss)  the normal way in. The app talks to  wss://YOUR-DOMAIN/ws  and derives everything else from it:
+#        /ws        the chat connection (WebSocket)
+#        /push      the wake-up channel (WebSocket)
+#        /upload    encrypted file upload
+#        /media/*   encrypted file download
+#   80  (http / ws)    only (a) the certificate challenge, which Caddy answers by itself, (b) a redirect to https for
+#        browsers, and (c) the FALLBACK: the app tries wss:// first and only when that cannot connect it tries ws:// on port 80.
+# Behind both, the Erlang server listens on 127.0.0.1:4080 (not reachable from outside). 8080 and 8443 are not used here.
+# /metrics is hidden (404). The admin web interface is not behind Caddy at all: it has its own ports 8080 (http) and 8443 (https).
 #
 # Start:  SKY_DOMAIN=chat.mydomain.com caddy run --config Caddyfile
 # (or replace the placeholder below with your domain; the part after ":" is the default)
-{$SKY_DOMAIN:chat.example.com} {
+
+(sky_backend) {
     # The server accepts uploads up to 25 MB; stop anything bigger before it reaches Erlang.
     request_body {
         max_size 26MB
     }
-
-    header Strict-Transport-Security "max-age=31536000"
-
-    reverse_proxy 127.0.0.1:8080 {
+    reverse_proxy 127.0.0.1:4080 {
         # /ws and /push are long-lived: do not cut them when the Caddy config is reloaded
         stream_close_delay 5m
+    }
+}
+
+# 443: the real thing
+{$SKY_DOMAIN:chat.example.com} {
+    header Strict-Transport-Security "max-age=31536000"
+
+    # monitoring is for you only: Prometheus asks 127.0.0.1:4080/metrics directly, never through the internet
+    @metrics path /metrics*
+    handle @metrics {
+        respond 404
+    }
+
+    handle {
+        import sky_backend
+    }
+}
+
+# 80: fallback for the app, redirect for everything else
+http://{$SKY_DOMAIN:chat.example.com} {
+    @app path /ws /push /upload /media/*
+    handle @app {
+        import sky_backend
+    }
+    handle {
+        redir https://{host}{uri} permanent
     }
 }

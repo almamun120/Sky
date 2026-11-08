@@ -69,7 +69,6 @@ class ChatClient(
     @Volatile private var firstFrame: JSONObject? = null
     /** true = this connection speaks MessagePack (binary frames), false = JSON text. Set when it opens. */
     @Volatile private var binary = false
-    private val debuggable: Boolean get() = (ctx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
     @Volatile private var pendingPhone: String? = null
     @Volatile private var wantOnline = false
     private var retry = 0
@@ -120,11 +119,12 @@ class ChatClient(
         connect()
     }
 
-    /** Dev option: use another server address right away (also while logged in). */
+    /** Use another server address right away (also while logged in). */
     @Synchronized
     fun changeServer(url: String) {
-        ServerUrl.problem(url, debuggable)?.let { events.tryEmit(AuthEvent.Error("bad_url")); return }
-        prefs.serverUrl = url.trim()
+        ServerUrl.problem(url)?.let { events.tryEmit(AuthEvent.Error("bad_url")); return }
+        prefs.serverUrl = url
+        prefs.useFallback = false
         ws?.cancel(); ws = null; open = false
         state.value = Conn.Offline
         if (wantOnline) connect()
@@ -133,8 +133,8 @@ class ChatClient(
     @Synchronized
     private fun connect() {
         if (ws != null) return
-        val url = prefs.serverUrl
-        ServerUrl.problem(url, debuggable)?.let {
+        val url = prefs.effectiveUrl            // wss:// normally; the ws:// fallback after wss:// failed to connect
+        ServerUrl.problem(url)?.let {
             authBusy = false
             events.tryEmit(AuthEvent.Error("bad_url"))
             return
@@ -186,9 +186,18 @@ class ChatClient(
     @Synchronized
     private fun dropped(w: WebSocket) {
         if (ws != null && w !== ws) return
+        val wasOpen = open
         ws = null
         open = false
         state.value = Conn.Offline
+        if (!wasOpen && (wantOnline || authBusy) && !prefs.useFallback && ServerUrl.fallback(prefs.serverUrl) != null) {
+            // wss:// could not connect at all: try ws:// (the fallback) once, right now. A login in progress is kept (firstFrame).
+            prefs.useFallback = true
+            connect()
+            return
+        }
+        // the fallback failed too, or a working connection ended: the next attempt starts with wss:// again
+        prefs.useFallback = false
         if (authBusy) {
             authBusy = false
             firstFrame = null
@@ -242,7 +251,7 @@ class ChatClient(
     @Synchronized
     private fun sendAuth(frame: JSONObject) {
         authBusy = true
-        if (ws != null && connectedUrl != prefs.serverUrl) {   // server address changed
+        if (ws != null && connectedUrl != prefs.effectiveUrl) {   // server address changed
             ws?.cancel(); ws = null; open = false
         }
         val w = ws
@@ -346,6 +355,25 @@ class ChatClient(
 
     fun setAnnounce(gid: String, on: Boolean) =
         groupFrame("type" to "group_settings", "group" to gid, "announce" to on)
+
+    fun setApproval(gid: String, on: Boolean) =
+        groupFrame("type" to "group_approval", "group" to gid, "on" to on)
+
+    /** An admin accepts or refuses a person who asked to join through the invite link. */
+    fun answerJoin(gid: String, phone: String, ok: Boolean) =
+        groupFrame("type" to "approve_join", "group" to gid, "phone" to phone, "ok" to ok)
+
+    // ---- communities ----
+    fun createCommunity(name: String) {
+        val n = name.trim().take(64)
+        if (n.isNotEmpty()) groupFrame("type" to "create_community", "name" to n)
+    }
+    fun addGroupToCommunity(cid: String, gid: String) =
+        groupFrame("type" to "community_add_group", "community" to cid, "group" to gid)
+    fun removeGroupFromCommunity(cid: String, gid: String) =
+        groupFrame("type" to "community_remove_group", "community" to cid, "group" to gid)
+    fun joinCommunityGroup(cid: String, gid: String) =
+        groupFrame("type" to "join_community_group", "community" to cid, "group" to gid)
 
     fun requestInvite(gid: String, reset: Boolean = false) =
         groupFrame("type" to "invite_create", "group" to gid, "reset" to reset)
@@ -536,6 +564,111 @@ class ChatClient(
         val g = j.optString("gid").takeIf { it.isNotEmpty() }?.let { dao.group(it) }
         val name = dao.contactName(from)?.ifEmpty { null } ?: from
         groupCalls?.onSignal(from, j, g?.members?.split(",")?.filter { it.isNotEmpty() } ?: emptyList(), g?.name ?: "", name)
+    }
+
+    // ---- chat wallpaper, storage, broadcast lists ----
+
+    val wallpaper = MutableStateFlow(prefs.wallpaper)
+    val wallpaperTick = MutableStateFlow(0)       // bumped when the picture itself was replaced
+    val wallpaperFile: File get() = File(mediaDir, "wallpaper.jpg")
+
+    fun setWallpaper(value: String) {
+        prefs.wallpaper = value
+        wallpaper.value = value
+        if (value != "img") bg.launch { if (wallpaperFile.exists()) media.shred(wallpaperFile) }
+    }
+
+    /** A picture from the gallery as the background of every chat (kept encrypted on the phone). */
+    fun setWallpaperImage(uri: Uri) {
+        bg.launch {
+            val plain = File(media.tmpDir, "wallpaper.in")
+            if (!prepareImage(uri, plain) || !media.store(plain, wallpaperFile)) { media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return@launch }
+            prefs.wallpaper = "img"
+            wallpaper.value = "img"
+            wallpaperTick.value += 1
+        }
+    }
+
+    /** Deletes the downloaded / saved files of one chat (the messages stay; received files can be downloaded again). */
+    fun clearChatMedia(chat: String) {
+        bg.launch {
+            dao.mediaFiles().filter { it.chat == chat }.forEach { shredMedia(it.localPath); dao.setLocal(it.id, "") }
+        }
+    }
+
+    fun createBroadcast(name: String, members: List<String>) {
+        if (members.size < 2) return
+        bg.launch {
+            dao.putBroadcast(BroadcastList("b:" + UUID.randomUUID(), name.trim().take(40).ifEmpty { "Broadcast" },
+                members.joinToString(","), System.currentTimeMillis()))
+        }
+    }
+
+    fun deleteBroadcast(id: String) {
+        bg.launch {
+            dao.mediaFiles().filter { it.chat == id }.forEach { shredMedia(it.localPath) }
+            dao.deleteChatMessages(id); dao.deleteBroadcast(id)
+        }
+    }
+
+    /** Each member gets [text] as a normal one-to-one message from me; the list keeps one copy as history. */
+    fun sendBroadcast(id: String, text: String) {
+        val body = text.trim().take(4000)
+        if (body.isEmpty()) return
+        bg.launch {
+            val l = dao.broadcast(id) ?: return@launch
+            dao.insert(Msg(UUID.randomUUID().toString(), id, true, body, System.currentTimeMillis(), St.SENT, true))
+            l.members.split(",").filter { it.isNotEmpty() && dao.isBlocked(it) == 0 }.forEach { send(it, body) }
+        }
+    }
+
+    /**
+     * A picture, video or file to every member of a broadcast list. The file is read, stored and encrypted ONCE and uploaded ONCE;
+     * every member then gets an ordinary one-to-one message that points at the same encrypted upload (each message has its own
+     * local copy, so deleting one does not touch the others). The list keeps one history entry.
+     */
+    fun sendBroadcastMedia(id: String, uri: Uri, caption: String = "") {
+        bg.launch {
+            val l = dao.broadcast(id) ?: return@launch
+            val members = l.members.split(",").filter { it.isNotEmpty() && dao.isBlocked(it) == 0 }
+            if (members.isEmpty()) return@launch
+            val type = ctx.contentResolver.getType(uri) ?: ""
+            val kind = if (type.startsWith("image/")) "image" else if (type.startsWith("video/")) "video" else "file"
+            val hist = prepareMedia(id, uri, kind, caption, 0, 0f) ?: return@launch
+            // decrypt the local copy once, encrypt it with a fresh key and upload it once
+            val enc = File(ctx.cacheDir, hist.id + ".enc")
+            val plain = File(media.tmpDir, hist.id + ".bc")
+            val key = withContext(Dispatchers.IO) {
+                try {
+                    val ok = plain.outputStream().use { o -> media.decryptTo(File(hist.localPath), o) }
+                        if (ok) MediaCrypto.encrypt(plain, enc) else null
+                } catch (e: Exception) { null }
+            }
+            val mid = if (key != null) upload(enc, "application/octet-stream") else null
+            enc.delete()
+            if (key == null || mid == null) {
+                media.shred(plain); shredMedia(hist.localPath); events.emit(AuthEvent.Error("upload_failed")); return@launch
+            }
+            dao.insert(hist.copy(status = St.SENT, media = mid, mkey = b64(key)))
+            val now = System.currentTimeMillis()
+            for ((i, p) in members.withIndex()) {
+                val mid2 = UUID.randomUUID().toString()
+                val copyPlain = File(media.tmpDir, "$mid2.in")
+                val out = File(mediaDir, mid2 + (hist.fname.substringAfterLast('.', "").take(8).let { if (it.isEmpty()) "" else ".$it" }))
+                val ok = withContext(Dispatchers.IO) {
+                    try { plain.copyTo(copyPlain, overwrite = true); true } catch (e: Exception) { false }
+                } && media.store(copyPlain, out)
+                if (!ok) { media.shred(copyPlain); continue }
+                if (kind == "video") {
+                    val th = File(hist.localPath + ".thumb")
+                    if (th.exists()) try { th.copyTo(File(out.absolutePath + ".thumb"), overwrite = true) } catch (_: Exception) {}
+                }
+                enqueue(Msg(id = mid2, chat = p, fromMe = true, body = hist.body, ts = now + i, status = St.PENDING, seen = true,
+                    kind = kind, fname = hist.fname, mime = hist.mime, size = hist.size, localPath = out.absolutePath,
+                    media = mid, mkey = b64(key)))
+            }
+            media.shred(plain)
+        }
     }
 
     // ---- disappearing messages, view once ----
@@ -1064,6 +1197,29 @@ class ChatClient(
         }
     }
 
+    /** A poll: 2 to 12 options. Everybody in the chat sees it; votes come back as encrypted control messages. */
+    fun sendPoll(chat: String, question: String, options: List<String>, multi: Boolean) {
+        val q = question.trim().take(200)
+        val opts = options.map { it.trim().take(100) }.filter { it.isNotEmpty() }.distinct().take(12)
+        if (q.isEmpty() || opts.size < 2) return
+        val body = JSONObject().put("q", q).put("o", org.json.JSONArray(opts)).put("m", if (multi) 1 else 0).toString()
+        bg.launch { enqueue(Msg(UUID.randomUUID().toString(), chat, true, body, System.currentTimeMillis(), St.PENDING, true, kind = "poll")) }
+    }
+
+    /** My answer to a poll ([choices] = option numbers; empty = take my vote back). Sent to everybody in the chat. */
+    fun votePoll(m: Msg, choices: List<Int>) {
+        val me = prefs.phone ?: return
+        bg.launch {
+            val n = try { JSONObject(m.body).getJSONArray("o").length() } catch (e: Exception) { return@launch }
+            val multi = try { JSONObject(m.body).optInt("m") == 1 } catch (e: Exception) { false }
+            val c = choices.filter { it in 0 until n }.distinct().sorted().let { if (multi) it else it.take(1) }
+            val csv = c.joinToString(",")
+            dao.putVote(PollVote(m.id, me, csv, System.currentTimeMillis()))
+            enqueue(Msg(UUID.randomUUID().toString(), m.chat, true, csv, System.currentTimeMillis(), St.PENDING, true,
+                kind = "ctl", mime = "vote", replyId = m.id))
+        }
+    }
+
     fun star(m: Msg, on: Boolean) { bg.launch { dao.setStar(m.id, on) } }
 
     /** Deletes a stored attachment and, for videos, its small preview picture. */
@@ -1132,6 +1288,7 @@ class ChatClient(
             "del" -> {
                 val path = dao.pathOf(tid, chat, 0, from)         // null = not found or not theirs
                 if (path != null) {
+                    dao.deleteVotes(tid)
                     dao.tombstone(tid, chat, 0, from)
                     dao.deleteReactions(tid)
                     shredMedia(path)
@@ -1142,6 +1299,17 @@ class ChatClient(
                 if (dao.chatOf(tid) == chat) {            // only for a message in this very chat
                     if (e.isEmpty() || e.length > 16) dao.removeReaction(tid, from)
                     else dao.putReaction(Reaction(tid, from, e))
+                }
+            }
+            "vote" -> {
+                val poll = dao.getMsg(tid)
+                if (poll != null && poll.chat == chat && poll.kind == "poll") {     // only a poll of this very chat
+                    val pj = try { JSONObject(poll.body) } catch (e: Exception) { null }
+                    val n = pj?.optJSONArray("o")?.length() ?: 0
+                    val multi = pj?.optInt("m") == 1
+                    val ch = p.optString("b").split(",").mapNotNull { it.toIntOrNull() }.filter { it in 0 until n }.distinct().sorted()
+                        .let { if (multi) it else it.take(1) }
+                    dao.putVote(PollVote(tid, from, ch.joinToString(","), System.currentTimeMillis()))
                 }
             }
             "edit" -> {
@@ -1229,7 +1397,7 @@ class ChatClient(
 
     // ---- attachments ----
 
-    private fun httpBase() = prefs.serverUrl
+    private fun httpBase() = prefs.effectiveUrl
         .replaceFirst("wss://", "https://").replaceFirst("ws://", "http://").removeSuffix("/ws")
 
     private suspend fun upload(f: File, mime: String): String? = withContext(Dispatchers.IO) {
@@ -1291,8 +1459,13 @@ class ChatClient(
     }
 
     private suspend fun sendMediaNow(chat: String, uri: Uri, kind: String, caption: String, rotation: Int, aspect: Float, once: Boolean = false) {
+        enqueue(prepareMedia(chat, uri, kind, caption, rotation, aspect, once) ?: return)
+    }
+
+    /** Reads the picture / video / file, stores a vault-encrypted local copy and returns the message (not yet queued), or null after an error event. */
+    private suspend fun prepareMedia(chat: String, uri: Uri, kind: String, caption: String, rotation: Int, aspect: Float, once: Boolean = false): Msg? {
         val (name, size) = queryMeta(uri)
-        if (size > maxUpload - 1024) { events.emit(AuthEvent.Error("too_large")); return }
+        if (size > maxUpload - 1024) { events.emit(AuthEvent.Error("too_large")); return null }
         val id = UUID.randomUUID().toString()
         val ext = name.substringAfterLast('.', "").take(8)
         val out = File(mediaDir, id + if (kind == "image") ".jpg" else if (ext.isEmpty()) "" else ".$ext")
@@ -1300,27 +1473,27 @@ class ChatClient(
         val mime: String
         val fname: String
         if (kind == "image") {
-            if (!prepareImage(uri, plain, rotation, aspect)) { media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return }
+            if (!prepareImage(uri, plain, rotation, aspect)) { media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return null }
             mime = "image/jpeg"; fname = "photo.jpg"
         } else {
             val ok = ctx.contentResolver.openInputStream(uri)?.use { i ->
                 plain.outputStream().use { o -> i.copyTo(o) }; true
             } ?: false
-            if (!ok) { media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return }
+            if (!ok) { media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return null }
             mime = ctx.contentResolver.getType(uri) ?: if (kind == "video") "video/mp4" else "application/octet-stream"
             fname = name
         }
         val plainSize = plain.length()
         if (plainSize > maxUpload - 1024) {
-            media.shred(plain); events.emit(AuthEvent.Error("too_large")); return
+            media.shred(plain); events.emit(AuthEvent.Error("too_large")); return null
         }
         if (kind == "video") makeVideoThumb(plain, File(out.absolutePath + ".thumb"))
         if (!media.store(plain, out)) {
-            media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return
+            media.shred(plain); events.emit(AuthEvent.Error("bad_file")); return null
         }
-        enqueue(Msg(id = id, chat = chat, fromMe = true, body = caption.trim().take(1000), ts = System.currentTimeMillis(),
+        return Msg(id = id, chat = chat, fromMe = true, body = caption.trim().take(1000), ts = System.currentTimeMillis(),
             status = St.PENDING, seen = true, kind = kind, fname = fname, mime = mime,
-            size = plainSize, localPath = out.absolutePath, once = if (once) 1 else 0))
+            size = plainSize, localPath = out.absolutePath, once = if (once) 1 else 0)
     }
 
     /** First frame of a video as a small picture, stored (vault-encrypted) next to the video as "<file>.thumb". */
@@ -1595,8 +1768,15 @@ class ChatClient(
             ackMsg(id, from, group, false)
             return
         }
-        val kind = p.optString("k", "text").let { if (it in setOf("text", "image", "video", "audio", "file", "sticker", "location", "contact")) it else "file" }
+        val kind = p.optString("k", "text").let { if (it in setOf("text", "image", "video", "audio", "file", "sticker", "location", "contact", "poll")) it else "file" }
         val body = p.optString("b")
+        if (kind == "poll") {
+            val ok = try {
+                val j = JSONObject(body)
+                body.length <= 4000 && j.getString("q").length <= 200 && j.getJSONArray("o").length() in 2..12
+            } catch (e: Exception) { false }
+            if (!ok) { ackMsg(id, from, group, false); return }
+        }
         val fname = p.optString("fn")
         val msg = Msg(id = id, chat = chat, fromMe = false, body = body, ts = o.getLong("ts"),
             status = St.DELIVERED, seen = isOpen, sender = from, kind = kind,
@@ -1727,7 +1907,26 @@ class ChatClient(
                 val admArr = o.optJSONArray("admins")
                 val admins = if (admArr == null) listOf(o.getString("owner")) else (0 until admArr.length()).map { admArr.getString(it) }
                 val announce = o.optBoolean("announce", false)
+                val approval = o.optBoolean("approval", false)
+                val reqArr = o.optJSONArray("requests")
+                val requests = org.json.JSONArray().also { a ->
+                    if (reqArr != null) for (i in 0 until reqArr.length()) {
+                        val r = reqArr.getJSONObject(i)
+                        a.put(JSONObject().put("p", r.getString("phone")).put("n", r.optString("name", "")))
+                    }
+                }.toString()
+                val subArr = o.optJSONArray("groups")
+                val subs = org.json.JSONArray().also { a ->
+                    if (subArr != null) for (i in 0 until subArr.length()) {
+                        val g = subArr.getJSONObject(i)
+                        a.put(JSONObject().put("g", g.getString("gid")).put("n", g.optString("name", "")))
+                    }
+                }.toString()
                 if (prev != null) {
+                    if (approval != prev.approval)
+                        info(o.getString("gid"), if (approval) "New members now need an admin's approval" else "New members no longer need approval")
+                    if (me != null && admins.contains(me) && requests.length > 2 && requests != prev.requests)
+                        info(o.getString("gid"), "Someone asked to join this group (open the group info to answer)")
                     val before = prev.admins.split(",").filter { it.isNotEmpty() }.toSet()
                     (admins.toSet() - before - o.getString("owner")).forEach {
                         info(o.getString("gid"), (if (it == me) "You are" else (nameOf[it]?.ifEmpty { null } ?: it) + " is") + " now an admin")
@@ -1738,11 +1937,17 @@ class ChatClient(
                 dao.upsertGroup(ChatGroup(o.getString("gid"), o.getString("name"),
                     phones.joinToString(","), o.getString("owner"), o.getLong("ts"),
                     prev?.descr ?: "", prev?.photoMid ?: "", prev?.photoKey ?: "", prev?.photoPath ?: "",
-                    admins.joinToString(","), announce))
+                    admins.joinToString(","), announce, approval, requests,
+                    o.optString("parent", ""), o.optBoolean("community", false), subs))
                 // The owner hands the description and photo to people who just joined.
                 if (prev != null && me != null && o.getString("owner") == me && (phones - old.orEmpty().toSet()).isNotEmpty() &&
                     (prev.descr.isNotEmpty() || prev.photoMid.isNotEmpty()))
                     sendGroupInfo(prev.gid, prev.descr, prev.photoMid, prev.photoKey)
+                wsSend(js("type" to "got", "pid" to o.getString("pid")))
+            }
+            "join_pending" -> events.emit(AuthEvent.Error("join_pending"))
+            "join_rejected" -> {
+                events.emit(AuthEvent.Error("join_rejected"))
                 wsSend(js("type" to "got", "pid" to o.getString("pid")))
             }
             "group_removed" -> {

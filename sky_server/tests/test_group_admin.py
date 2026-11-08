@@ -1,6 +1,6 @@
 """Group admins, 'only admins can send', invite links, and the owner's successor."""
 import asyncio, json, random, base64, websockets
-HOST="ws://127.0.0.1:8080"
+HOST="ws://127.0.0.1:4080"
 b64=lambda b: base64.b64encode(b).decode()
 CT=b64(b"\x33"+b"x"*100)
 async def jrx(ws,t=3): return json.loads(await asyncio.wait_for(ws.recv(),t))

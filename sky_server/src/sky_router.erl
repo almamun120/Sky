@@ -24,10 +24,10 @@ lookup(Phone) ->
         [] -> error
     end.
 
-%% State: of = #{WatcherPid => Target}, by = #{Target => [WatcherPid]}
+%% State: watching = #{WatcherPid => Target}, by = #{Target => [WatcherPid]}
 init([]) ->
     ?T = ets:new(?T, [named_table, set, protected, {read_concurrency, true}]),
-    {ok, #{of => #{}, by => #{}}}.
+    {ok, #{watching => #{}, by => #{}}}.
 
 handle_call({register, Phone, Pid}, _From, S) ->
     case ets:lookup(?T, Phone) of
@@ -44,8 +44,8 @@ handle_cast({watch, Pid, Target}, S) ->
     case Target of
         undefined -> {noreply, S1};
         _ when is_binary(Target) ->
-            #{of := Of, by := By} = S1,
-            {noreply, S1#{of := Of#{Pid => Target},
+            #{watching := Of, by := By} = S1,
+            {noreply, S1#{watching := Of#{Pid => Target},
                           by := By#{Target => [Pid | maps:get(Target, By, [])]}}}
     end;
 handle_cast({changed, Phone}, S) ->
@@ -63,13 +63,13 @@ handle_info({'DOWN', _Ref, process, Pid, _Why}, S) ->
     {noreply, S1};
 handle_info(_, S) -> {noreply, S}.
 
-unwatch(Pid, #{of := Of, by := By} = S) ->
+unwatch(Pid, #{watching := Of, by := By} = S) ->
     case maps:take(Pid, Of) of
         error -> S;
         {Target, Of1} ->
             Left = lists:delete(Pid, maps:get(Target, By, [])),
             By1 = case Left of [] -> maps:remove(Target, By); _ -> By#{Target => Left} end,
-            S#{of := Of1, by := By1}
+            S#{watching := Of1, by := By1}
     end.
 
 notify(Phone, #{by := By}) ->

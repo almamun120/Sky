@@ -36,7 +36,7 @@ object Backup {
     private val MAGIC = "SKYBK1".toByteArray()
     private const val ITER = 250_000
     private const val CHUNK = 1 shl 20
-    private val TABLES = listOf("messages", "contacts", "chat_groups", "receipts", "reactions", "chat_state", "peer_profile")
+    private val TABLES = listOf("messages", "contacts", "chat_groups", "receipts", "reactions", "chat_state", "peer_profile", "poll_vote")
 
     // ---------------- key and pieces ----------------
 

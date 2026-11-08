@@ -53,7 +53,7 @@ fun CallScreen(app: SkyApp, call: CallUi) {
     }
     if (showRoutes) androidx.compose.material3.AlertDialog(
         onDismissRequest = { showRoutes = false },
-        title = { androidx.compose.material3.Text("Sound") },
+        title = { androidx.compose.material3.Text(t("Sound")) },
         text = {
             Column {
                 com.skychat.app.call.AudioRoute.available(ctx).forEach { r ->
@@ -62,7 +62,7 @@ fun CallScreen(app: SkyApp, call: CallUi) {
                 }
             }
         },
-        confirmButton = {}, dismissButton = { androidx.compose.material3.TextButton(onClick = { showRoutes = false }) { androidx.compose.material3.Text("Cancel") } }
+        confirmButton = {}, dismissButton = { androidx.compose.material3.TextButton(onClick = { showRoutes = false }) { androidx.compose.material3.Text(t("Cancel")) } }
     )
 
     LaunchedEffect(call.phase) {
@@ -71,9 +71,9 @@ fun CallScreen(app: SkyApp, call: CallUi) {
 
     val secs = ((now - call.startedAt) / 1000).toInt().coerceAtLeast(0)
     val status = when (call.phase) {
-        Phase.OUTGOING -> "Calling…"
-        Phase.INCOMING -> if (call.video) "Incoming video call" else "Incoming voice call"
-        Phase.CONNECTING -> "Connecting…"
+        Phase.OUTGOING -> t("Calling…")
+        Phase.INCOMING -> if (call.video) t("Incoming video call") else t("Incoming voice call")
+        Phase.CONNECTING -> t("Connecting…")
         Phase.ACTIVE -> "%d:%02d".format(secs / 60, secs % 60)
         Phase.IDLE -> ""
     }

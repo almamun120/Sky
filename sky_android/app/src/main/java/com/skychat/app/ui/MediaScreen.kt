@@ -34,8 +34,8 @@ fun MediaScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
     var viewer by remember { mutableStateOf<String?>(null) }
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("Media and documents") },
-            navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") } },
+            title = { Text(t("Media and documents")) },
+            navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("Back")) } },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Sky.bar, titleContentColor = Color.White,
                 navigationIconContentColor = Color.White)
         )
@@ -48,7 +48,7 @@ fun MediaScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
             }
             if (tab == 0) {
                 if (shown.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No photos or videos yet.", color = Color.Gray)
+                    Text(t("No photos or videos yet."), color = Color.Gray)
                 } else LazyVerticalGrid(GridCells.Fixed(3), Modifier.fillMaxSize(),
                     horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     items(shown.reversed(), key = { it.id }) { m ->
@@ -57,7 +57,7 @@ fun MediaScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
                 }
             } else if (tab == 2) {
                 if (links.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No links yet.", color = Color.Gray)
+                    Text(t("No links yet."), color = Color.Gray)
                 } else LazyColumn(Modifier.fillMaxSize()) {
                     items(links, key = { it.id }) { m ->
                         val url = Regex("https?://[^\\s<>\"]+").find(m.body)?.value ?: ""
@@ -72,7 +72,7 @@ fun MediaScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
                 }
             } else {
                 if (docs.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No documents yet.", color = Color.Gray)
+                    Text(t("No documents yet."), color = Color.Gray)
                 } else LazyColumn(Modifier.fillMaxSize()) {
                     items(docs, key = { it.id }) { m ->
                         val local = hasLocalFile(m)
@@ -81,7 +81,7 @@ fun MediaScreen(app: SkyApp, chat: String, onBack: () -> Unit) {
                         }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text("📄", fontSize = 24.sp, modifier = Modifier.width(40.dp))
                             Column(Modifier.weight(1f)) {
-                                Text(m.fname.ifEmpty { "File" }, maxLines = 1)
+                                Text(m.fname.ifEmpty { t("File") }, maxLines = 1)
                                 Text(timeText(m.ts) + if (local) "" else " · tap to download", fontSize = 12.sp, color = Color.Gray)
                             }
                         }

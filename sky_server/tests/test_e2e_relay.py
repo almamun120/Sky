@@ -1,5 +1,5 @@
 import asyncio, json, websockets, base64
-URL="ws://127.0.0.1:8080/ws"
+URL="ws://127.0.0.1:4080/ws"
 b64=lambda b: base64.b64encode(b).decode()
 async def rx(ws,t=3): return json.loads(await asyncio.wait_for(ws.recv(),t))
 async def until(ws,typ,t=3):

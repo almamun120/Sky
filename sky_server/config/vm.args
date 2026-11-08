@@ -1,0 +1,20 @@
+## Erlang VM settings of the Sky server (used by "rebar3 as prod release"; see "Scaling" in README.md)
+
+## the name of the node and its secret. Change the cookie (any long random text); keep it private.
+-sname sky
+-setcookie CHANGE_THIS_TO_A_LONG_RANDOM_TEXT
+
+## how many Erlang processes and ports (connections) the VM may have. The defaults (262144 / 65536) are too small for 100 000 phones.
++P 4194304
++Q 1048576
+
+## a bigger buffer between nodes and for busy sockets
++zdbbl 131072
+
+## the node listens for its own console only on this machine
+-kernel inet_dist_use_interface "{127,0,0,1}"
+
+## do not wait busily when idle (saves CPU for the phones' batteries... and the electricity bill)
++sbwt none
++sbwtdcpu none
++sbwtdio none

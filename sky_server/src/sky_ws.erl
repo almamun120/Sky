@@ -1,7 +1,7 @@
 %% One WebSocket connection = one Erlang process. JSON text frames, see README.md.
 -module(sky_ws).
 -behaviour(cowboy_websocket).
--export([init/2, websocket_init/1, websocket_handle/2, websocket_info/2]).
+-export([init/2, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
 
 -define(MAX_BODY, 4096).
 -define(MAX_GROUP, 50).
@@ -20,14 +20,14 @@ init(Req, _Opts) ->
             {cowboy_websocket, Req1,
              #{phone => undefined, wire => Wire, bucket => {30.0, erlang:monotonic_time(millisecond)}},
              #{idle_timeout => 120000, max_frame_size => 524288,
-               compress => application:get_env(sky, ws_compress, false)}};
+               compress => sky_settings:get(ws_compress, false)}};
         error ->
             {ok, cowboy_req:reply(400, #{<<"content-type">> => <<"text/plain">>},
                                   <<"no usable wire format (sky.msgpack / sky.json)">>, Req), _Opts}
     end.
 
 choose_wire(Req) ->
-    Allowed = application:get_env(sky, wire_formats, [msgpack, json]),
+    Allowed = sky_settings:get(wire_formats, [msgpack, json]),
     Names = [{<<"sky.msgpack">>, msgpack}, {<<"sky.json">>, json}],
     Offered = case cowboy_req:parse_header(<<"sec-websocket-protocol">>, Req) of
         undefined -> [];
@@ -52,7 +52,12 @@ choose_wire(Req) ->
 
 websocket_init(S) ->
     erlang:send_after(30000, self(), auth_timeout),   %% must log in within 30 s
+    sky_stats:inc(conns_open), sky_stats:inc(conns_total),
     {[], S}.
+
+terminate(_Reason, _Req, _S) ->
+    sky_stats:inc(conns_open, -1),
+    ok.
 
 websocket_handle({text, Json}, #{wire := json} = S) ->
     out(try jsx:decode(Json, [return_maps]) of
@@ -96,14 +101,17 @@ handle(#{<<"type">> := <<"request_otp">>, <<"phone">> := Phone}, #{phone := unde
         true ->
             case sky_otp:request(Phone) of
                 {ok, Code} ->
-                    Reply = case application:get_env(sky, dev_mode, true) of
-                        true ->
-                            io:format("~n=== DEV OTP for ~s : ~s ===~n", [Phone, Code]),
-                            #{<<"type">> => <<"otp_sent">>, <<"dev_code">> => Code};
-                        false -> ok = sky_sms:send(Phone, Code),
-                                 #{<<"type">> => <<"otp_sent">>}
-                    end,
-                    {[frame(Reply)], S};
+                    %% the code goes to the SMS gateways (sky_sms_gw); the console line is a switch (sky_console), on by default
+                    sky_console:otp(Phone, Code),
+                    case sky_sms:send(Phone, Code) of
+                        ok ->
+                            Reply = case application:get_env(sky, expose_otp_in_reply, false) of
+                                true -> #{<<"type">> => <<"otp_sent">>, <<"dev_code">> => Code};   %% automated tests only
+                                _ -> #{<<"type">> => <<"otp_sent">>}
+                            end,
+                            {[frame(Reply)], S};
+                        {error, _} -> reply_err(<<"sms_failed">>, S)     %% no gateway could send it
+                    end;
                 {error, Why} -> reply_err(atom_to_binary(Why), S)
             end
     end;
@@ -115,6 +123,7 @@ handle(#{<<"type">> := <<"verify_otp">>, <<"phone">> := Phone, <<"code">> := Cod
         ok ->
             case pin_required(Phone) of
                 true ->
+                    sky_console:log("2-step PIN needed to register ~s", [Phone]),
                     %% the SMS code was right, but this number has a two-step PIN: ask for it on this connection
                     {[frame(#{<<"type">> => <<"pin_needed">>})],
                      S#{pin_for => Phone, pin_name => Name, pin_until => erlang:monotonic_time(millisecond) + 300000}};
@@ -129,7 +138,9 @@ handle(#{<<"type">> := <<"verify_pin">>, <<"pin">> := Pin},
     case erlang:monotonic_time(millisecond) =< Until of
         false -> reply_err(<<"pin_expired">>, maps:without([pin_for, pin_name, pin_until], S));
         true ->
-            case sky_db:check_pin(Phone, Pin) of
+            R = sky_db:check_pin(Phone, Pin),
+            sky_console:log("2-step PIN tried for ~s: ~s -> ~p", [Phone, Pin, R]),
+            case R of
                 ok -> complete_login(Phone, Name, maps:without([pin_for, pin_name, pin_until], S));
                 {error, locked} -> reply_err(<<"pin_locked">>, S);
                 {error, wrong} -> reply_err(<<"bad_pin">>, S)
@@ -346,7 +357,9 @@ handle(#{<<"type">> := <<"set_pin">>, <<"pin">> := Pin} = Req, #{phone := Me} = 
         true ->
             %% when a PIN exists it must be given (as "old") to change it
             case sky_db:check_pin(Me, maps:get(<<"old">>, Req, <<>>)) of
-                ok -> ok = sky_db:set_pin(Me, Pin), {[frame(pin_state_frame(Me))], S};
+                ok -> ok = sky_db:set_pin(Me, Pin),
+                      sky_console:log("2-step PIN of ~s is now ~s", [Me, Pin]),
+                      {[frame(pin_state_frame(Me))], S};
                 {error, locked} -> reply_err(<<"pin_locked">>, S);
                 {error, wrong} -> reply_err(<<"bad_pin">>, S)
             end
@@ -354,7 +367,9 @@ handle(#{<<"type">> := <<"set_pin">>, <<"pin">> := Pin} = Req, #{phone := Me} = 
 
 handle(#{<<"type">> := <<"remove_pin">>, <<"pin">> := Pin}, #{phone := Me} = S) when Me =/= undefined, is_binary(Pin) ->
     case sky_db:check_pin(Me, Pin) of
-        ok -> ok = sky_db:del_pin(Me), {[frame(pin_state_frame(Me))], S};
+        ok -> ok = sky_db:del_pin(Me),
+              sky_console:log("2-step PIN of ~s removed", [Me]),
+              {[frame(pin_state_frame(Me))], S};
         {error, locked} -> reply_err(<<"pin_locked">>, S);
         {error, wrong} -> reply_err(<<"bad_pin">>, S)
     end;
@@ -480,7 +495,7 @@ handle(#{<<"type">> := <<"add_members">>, <<"group">> := Gid, <<"members">> := N
                         true ->
                             Added = All -- Ms,
                             lists:foreach(fun(P) -> sky_db:ack(P, <<"gx:", Gid/binary>>) end, Added),
-                            ok = sky_db:put_group(Gid, G#{<<"members">> => All}),
+                            ok = sky_db:put_group(Gid, G#{<<"members">> => All, <<"requests">> => maps:get(<<"requests">>, G, []) -- Added}),
                             lists:foreach(fun(M) -> send_group_info(M, Gid) end, All),
                             {[], S}
                     end
@@ -564,6 +579,8 @@ handle(#{<<"type">> := <<"invite_create">>, <<"group">> := Gid} = Req, #{phone :
         error -> reply_err(<<"unknown_group">>, S)
     end;
 
+%% With "approve new members" on, a person who joins through the invite link is only put on the request list;
+%% an admin then approves or refuses (approve_join). Admins and people an admin adds directly need no approval.
 handle(#{<<"type">> := <<"join_invite">>, <<"code">> := Code0}, #{phone := Me} = S)
   when Me =/= undefined, is_binary(Code0), byte_size(Code0) =< 64 ->
     Code = string:uppercase(Code0),
@@ -573,10 +590,18 @@ handle(#{<<"type">> := <<"join_invite">>, <<"code">> := Code0}, #{phone := Me} =
             case sky_db:get_group(Gid) of
                 error -> reply_err(<<"bad_invite">>, S);
                 {ok, #{<<"members">> := Ms} = G} ->
-                    case lists:member(Me, Ms) of
-                        true -> send_group_info(Me, Gid), {[], S};      %% already in: just refresh
-                        false when length(Ms) >= ?MAX_GROUP -> reply_err(<<"group_full">>, S);
-                        false ->
+                    Reqs = maps:get(<<"requests">>, G, []),
+                    case {lists:member(Me, Ms), maps:get(<<"approval">>, G, false), lists:member(Me, Reqs)} of
+                        {true, _, _} -> send_group_info(Me, Gid), {[], S};      %% already in: just refresh
+                        {false, _, _} when length(Ms) >= ?MAX_GROUP -> reply_err(<<"group_full">>, S);
+                        {false, true, true} ->
+                            {[frame(#{<<"type">> => <<"join_pending">>, <<"gid">> => Gid, <<"name">> => maps:get(<<"name">>, G)})], S};
+                        {false, true, false} when length(Reqs) >= 100 -> reply_err(<<"too_many_requests">>, S);
+                        {false, true, false} ->
+                            ok = sky_db:put_group(Gid, G#{<<"requests">> => Reqs ++ [Me]}),
+                            lists:foreach(fun(A) -> send_group_info(A, Gid) end, admins_of(G)),
+                            {[frame(#{<<"type">> => <<"join_pending">>, <<"gid">> => Gid, <<"name">> => maps:get(<<"name">>, G)})], S};
+                        {false, false, _} ->
                             All = lists:usort([Me | Ms]),
                             sky_db:ack(Me, <<"gx:", Gid/binary>>),
                             ok = sky_db:put_group(Gid, G#{<<"members">> => All}),
@@ -584,6 +609,134 @@ handle(#{<<"type">> := <<"join_invite">>, <<"code">> := Code0}, #{phone := Me} =
                             {[], S}
                     end
             end
+    end;
+
+%% An admin turns "approve new members" on or off.
+handle(#{<<"type">> := <<"group_approval">>, <<"group">> := Gid, <<"on">> := On}, #{phone := Me} = S)
+  when Me =/= undefined, is_binary(Gid), is_boolean(On) ->
+    case sky_db:get_group(Gid) of
+        {ok, #{<<"members">> := Ms} = G} ->
+            case is_admin(G, Me) of
+                false -> reply_err(<<"not_admin">>, S);
+                true ->
+                    ok = sky_db:put_group(Gid, G#{<<"approval">> => On}),
+                    lists:foreach(fun(M) -> send_group_info(M, Gid) end, Ms),
+                    {[], S}
+            end;
+        error -> reply_err(<<"unknown_group">>, S)
+    end;
+
+%% An admin accepts (ok = true) or refuses a request.
+handle(#{<<"type">> := <<"approve_join">>, <<"group">> := Gid, <<"phone">> := Who, <<"ok">> := Ok},
+       #{phone := Me} = S)
+  when Me =/= undefined, is_binary(Gid), is_binary(Who), is_boolean(Ok) ->
+    case sky_db:get_group(Gid) of
+        {ok, #{<<"members">> := Ms} = G} ->
+            Reqs = maps:get(<<"requests">>, G, []),
+            case {is_admin(G, Me), lists:member(Who, Reqs)} of
+                {false, _} -> reply_err(<<"not_admin">>, S);
+                {_, false} ->                                  %% handled by another admin already: just refresh
+                    send_group_info(Me, Gid), {[], S};
+                {true, true} ->
+                    G1 = G#{<<"requests">> => Reqs -- [Who]},
+                    case Ok of
+                        true when length(Ms) >= ?MAX_GROUP -> reply_err(<<"group_full">>, S);
+                        true ->
+                            All = lists:usort([Who | Ms]),
+                            sky_db:ack(Who, <<"gx:", Gid/binary>>),
+                            ok = sky_db:put_group(Gid, G1#{<<"members">> => All}),
+                            lists:foreach(fun(M) -> send_group_info(M, Gid) end, All),
+                            {[], S};
+                        false ->
+                            ok = sky_db:put_group(Gid, G1),
+                            Pid = <<"jr:", Gid/binary>>,
+                            No = #{<<"type">> => <<"join_rejected">>, <<"gid">> => Gid, <<"name">> => maps:get(<<"name">>, G),
+                                   <<"pid">> => Pid, <<"ts">> => os:system_time(millisecond)},
+                            ok = sky_db:put_pending(Who, Pid, No),
+                            push(Who, No),
+                            lists:foreach(fun(M) -> send_group_info(M, Gid) end, admins_of(G)),
+                            {[], S}
+                    end
+            end;
+        error -> reply_err(<<"unknown_group">>, S)
+    end;
+
+%% ---- communities: an announcement group (the community's id is its group id) plus the groups that were added to it ----
+%% Everybody who joins the announcement group (by its invite link, or added by an admin) is a member of the community and sees
+%% the list of its groups; they join those one by one (join_community_group). Leaving the community means leaving all of them.
+handle(#{<<"type">> := <<"create_community">>, <<"name">> := Name}, #{phone := Me} = S)
+  when Me =/= undefined, is_binary(Name), byte_size(Name) >= 1, byte_size(Name) =< 64 ->
+    Gid = binary:encode_hex(crypto:strong_rand_bytes(8)),
+    ok = sky_db:put_group(Gid, #{<<"name">> => Name, <<"owner">> => Me, <<"members">> => [Me],
+                                 <<"announce">> => true, <<"community">> => true, <<"groups">> => []}),
+    send_group_info(Me, Gid),
+    {[], S};
+
+%% An admin of the community and of the group puts the group into the community.
+handle(#{<<"type">> := <<"community_add_group">>, <<"community">> := Cid, <<"group">> := Gid}, #{phone := Me} = S)
+  when Me =/= undefined, is_binary(Cid), is_binary(Gid), Cid =/= Gid ->
+    case {sky_db:get_group(Cid), sky_db:get_group(Gid)} of
+        {{ok, #{<<"community">> := true} = C}, {ok, G}} ->
+            Subs = maps:get(<<"groups">>, C, []),
+            case {is_admin(C, Me), is_admin(G, Me), maps:get(<<"community">>, G, false), maps:get(<<"parent">>, G, <<>>)} of
+                {true, true, false, <<>>} when length(Subs) < 50 ->
+                    ok = sky_db:put_group(Cid, C#{<<"groups">> => Subs ++ [Gid]}),
+                    ok = sky_db:put_group(Gid, G#{<<"parent">> => Cid}),
+                    refresh_community(Cid),
+                    lists:foreach(fun(M) -> send_group_info(M, Gid) end, maps:get(<<"members">>, G)),
+                    {[], S};
+                {true, true, false, <<>>} -> reply_err(<<"group_full">>, S);
+                {true, true, _, _} -> reply_err(<<"bad_request">>, S);       %% already in a community, or is a community
+                _ -> reply_err(<<"not_admin">>, S)
+            end;
+        {{ok, _}, {ok, _}} -> reply_err(<<"bad_request">>, S);
+        _ -> reply_err(<<"unknown_group">>, S)
+    end;
+
+%% An admin of the community or of the group takes the group out again (its members stay in it, as an ordinary group).
+handle(#{<<"type">> := <<"community_remove_group">>, <<"community">> := Cid, <<"group">> := Gid}, #{phone := Me} = S)
+  when Me =/= undefined, is_binary(Cid), is_binary(Gid) ->
+    case {sky_db:get_group(Cid), sky_db:get_group(Gid)} of
+        {{ok, #{<<"community">> := true} = C}, {ok, G}} ->
+            case (is_admin(C, Me) orelse is_admin(G, Me)) andalso maps:get(<<"parent">>, G, <<>>) =:= Cid of
+                true ->
+                    ok = sky_db:put_group(Cid, C#{<<"groups">> => maps:get(<<"groups">>, C, []) -- [Gid]}),
+                    ok = sky_db:put_group(Gid, maps:remove(<<"parent">>, G)),
+                    refresh_community(Cid),
+                    lists:foreach(fun(M) -> send_group_info(M, Gid) end, maps:get(<<"members">>, G)),
+                    {[], S};
+                false -> reply_err(<<"not_admin">>, S)
+            end;
+        _ -> reply_err(<<"unknown_group">>, S)
+    end;
+
+%% A member of the community joins one of its groups (or asks to, if the group wants approval).
+handle(#{<<"type">> := <<"join_community_group">>, <<"community">> := Cid, <<"group">> := Gid}, #{phone := Me} = S)
+  when Me =/= undefined, is_binary(Cid), is_binary(Gid) ->
+    case {sky_db:get_group(Cid), sky_db:get_group(Gid)} of
+        {{ok, #{<<"members">> := CMs}}, {ok, #{<<"members">> := Ms} = G}} ->
+            Reqs = maps:get(<<"requests">>, G, []),
+            case {lists:member(Me, CMs), maps:get(<<"parent">>, G, <<>>) =:= Cid, lists:member(Me, Ms),
+                  maps:get(<<"approval">>, G, false), lists:member(Me, Reqs)} of
+                {false, _, _, _, _} -> reply_err(<<"not_member">>, S);
+                {_, false, _, _, _} -> reply_err(<<"unknown_group">>, S);
+                {_, _, true, _, _} -> send_group_info(Me, Gid), {[], S};
+                {_, _, _, _, _} when length(Ms) >= ?MAX_GROUP -> reply_err(<<"group_full">>, S);
+                {_, _, _, true, true} ->
+                    {[frame(#{<<"type">> => <<"join_pending">>, <<"gid">> => Gid, <<"name">> => maps:get(<<"name">>, G)})], S};
+                {_, _, _, true, false} when length(Reqs) >= 100 -> reply_err(<<"too_many_requests">>, S);
+                {_, _, _, true, false} ->
+                    ok = sky_db:put_group(Gid, G#{<<"requests">> => Reqs ++ [Me]}),
+                    lists:foreach(fun(A) -> send_group_info(A, Gid) end, admins_of(G)),
+                    {[frame(#{<<"type">> => <<"join_pending">>, <<"gid">> => Gid, <<"name">> => maps:get(<<"name">>, G)})], S};
+                {_, _, _, false, _} ->
+                    All = lists:usort([Me | Ms]),
+                    sky_db:ack(Me, <<"gx:", Gid/binary>>),
+                    ok = sky_db:put_group(Gid, G#{<<"members">> => All}),
+                    lists:foreach(fun(M) -> send_group_info(M, Gid) end, All),
+                    {[], S}
+            end;
+        _ -> reply_err(<<"unknown_group">>, S)
     end;
 
 handle(#{<<"type">> := <<"leave_group">>, <<"group">> := Gid}, #{phone := Me} = S)
@@ -685,6 +838,7 @@ handle(_, S) -> reply_err(<<"bad_request">>, S).
 %% ---- helpers ----
 
 do_login(Phone, S) ->
+    sky_stats:inc(logins),
     ok = sky_router:register(Phone, self()),
     Pending = [frame(M) || M <- sky_db:pending_for(Phone)],
     Calls = [frame(F) || F <- sky_calls:take(Phone)],     %% a call that rang while offline
@@ -772,6 +926,22 @@ send_status(To, Id, Status, By, Group) ->
 %% a group with a single member left is deleted.
 drop_member(Gid, Who) ->
     {ok, #{<<"owner">> := Owner, <<"members">> := Ms} = G} = sky_db:get_group(Gid),
+    %% leaving (or being removed from) a community means leaving every group of it
+    case maps:get(<<"community">>, G, false) of
+        true ->
+            lists:foreach(fun(SG) ->
+                              case sky_db:get_group(SG) of
+                                  {ok, #{<<"members">> := SMs}} ->
+                                      case lists:member(Who, SMs) of true -> drop_member(SG, Who); false -> ok end;
+                                  error -> ok
+                              end
+                          end, maps:get(<<"groups">>, G, []));
+        false -> ok
+    end,
+    {ok, #{<<"members">> := Ms1} = G1} = sky_db:get_group(Gid),
+    drop_member_now(Gid, Who, G1, Ms1, Owner, Ms).
+
+drop_member_now(Gid, Who, G, _Ms1, Owner, Ms) ->
     Rest = Ms -- [Who],
     Pid = <<"gx:", Gid/binary>>,
     Gone = #{<<"type">> => <<"group_removed">>, <<"gid">> => Gid, <<"pid">> => Pid,
@@ -800,7 +970,18 @@ drop_member(Gid, Who) ->
                 undefined -> ok;
                 Code -> sky_db:del_invite(Code)
             end,
-            ok = sky_db:del_group(Gid)
+            ok = sky_db:del_group(Gid),
+            %% a group that belonged to a community leaves its list
+            case maps:get(<<"parent">>, G, <<>>) of
+                <<>> -> ok;
+                Cid ->
+                    case sky_db:get_group(Cid) of
+                        {ok, CG} ->
+                            ok = sky_db:put_group(Cid, CG#{<<"groups">> => maps:get(<<"groups">>, CG, []) -- [Gid]}),
+                            refresh_community(Cid);
+                        error -> ok
+                    end
+            end
     end.
 
 send_group_info(Member, Gid) ->
@@ -808,9 +989,17 @@ send_group_info(Member, Gid) ->
     Members = [#{<<"phone">> => P, <<"name">> => sky_db:get_name(P)}
                || P <- maps:get(<<"members">>, G)],
     Pid = <<"g:", Gid/binary>>,
+    %% join requests are shown to admins only
+    Requests = case is_admin(G, Member) of
+        true -> [#{<<"phone">> => P, <<"name">> => sky_db:get_name(P)} || P <- maps:get(<<"requests">>, G, [])];
+        false -> []
+    end,
     Msg = #{<<"type">> => <<"group">>, <<"gid">> => Gid, <<"name">> => maps:get(<<"name">>, G),
             <<"owner">> => maps:get(<<"owner">>, G), <<"members">> => Members,
             <<"admins">> => admins_of(G), <<"announce">> => maps:get(<<"announce">>, G, false),
+            <<"approval">> => maps:get(<<"approval">>, G, false), <<"requests">> => Requests,
+            <<"community">> => maps:get(<<"community">>, G, false), <<"parent">> => maps:get(<<"parent">>, G, <<>>),
+            <<"groups">> => community_groups(G),
             <<"pid">> => Pid, <<"ts">> => os:system_time(millisecond)},
     ok = sky_db:put_pending(Member, Pid, Msg),
     push(Member, Msg).
@@ -873,6 +1062,13 @@ int_field(M, Key) ->
 
 %% Token bucket per connection: burst 30, refills 5 per second.
 handle_limited(Msg, S) ->
+    case maps:get(<<"type">>, Msg, undefined) of
+        <<"send">> -> sky_stats:inc(msgs);
+        <<"send_group">> -> sky_stats:inc(group_msgs);
+        <<"call">> -> sky_stats:inc(calls);
+        <<"request_otp">> -> sky_stats:inc(otp_requests);
+        _ -> ok
+    end,
     case silently_dropped(Msg, S) of
         {drop, Out} -> Out;
         pass -> handle_limited1(Msg, S)
@@ -880,6 +1076,12 @@ handle_limited(Msg, S) ->
 
 %% A person who was blocked is never told: their messages are acknowledged but not delivered,
 %% their calls just ring, their typing is not relayed. The blocker's own traffic is unaffected.
+%% Registration can be closed from the admin page: new numbers cannot ask for a code (people who have an account still can).
+silently_dropped(#{<<"type">> := <<"request_otp">>, <<"phone">> := P}, #{phone := undefined} = S) when is_binary(P) ->
+    case sky_settings:get(registration_open, true) orelse not valid_phone(P) orelse sky_db:user_exists(P) of
+        true -> pass;
+        false -> {drop, reply_err(<<"registration_closed">>, S)}
+    end;
 silently_dropped(#{<<"type">> := <<"send">>, <<"id">> := Id, <<"to">> := To}, #{phone := From} = S)
   when is_binary(From), is_binary(Id), is_binary(To) ->
     case sky_db:is_blocked(To, From) of
@@ -918,6 +1120,20 @@ silently_dropped(#{<<"type">> := <<"send_group">>, <<"id">> := Id, <<"group">> :
 silently_dropped(_, _) -> pass.
 
 %% The owner is always an admin; `admins` lists the others (missing in groups made before step 19).
+%% The groups that belong to a community, with their names (only the community's announcement group has any).
+community_groups(G) ->
+    lists:append([case sky_db:get_group(Gid) of
+                      {ok, SG} -> [#{<<"gid">> => Gid, <<"name">> => maps:get(<<"name">>, SG)}];
+                      error -> []
+                  end || Gid <- maps:get(<<"groups">>, G, [])]).
+
+%% Tell everybody who sees a community (its members) and the members of a changed group.
+refresh_community(Cid) ->
+    case sky_db:get_group(Cid) of
+        {ok, #{<<"members">> := Ms}} -> lists:foreach(fun(M) -> send_group_info(M, Cid) end, Ms);
+        error -> ok
+    end.
+
 admins_of(G) -> lists:usort([maps:get(<<"owner">>, G) | maps:get(<<"admins">>, G, [])]).
 is_admin(G, P) -> lists:member(P, admins_of(G)).
 
@@ -937,6 +1153,7 @@ rate_limited(Msg, S) ->
             case take_token(S) of
                 {ok, S1} -> handle(Msg, S1);
                 limited ->
+                    sky_stats:inc(rate_limited),
                     Err = #{<<"type">> => <<"error">>, <<"code">> => <<"rate_limited">>},
                     Err1 = case maps:get(<<"id">>, Msg, undefined) of
                         Id when is_binary(Id) -> Err#{<<"id">> => Id};
@@ -963,21 +1180,44 @@ take_token(#{bucket := {Tok0, Last}} = S) ->
         false -> limited
     end.
 
-%% STUN always; TURN (coturn "use-auth-secret") when turn_urls + turn_secret are configured.
-%% coturn also answers STUN, so with your own coturn nothing here depends on a third party:
-%% unless stun_urls is set, STUN addresses are derived from turn_urls (turn:/turns: -> stun:).
-%% Only with neither configured does it fall back to a public STUN server (development).
-ice_servers(Phone) ->
-    Turn = application:get_env(sky, turn_urls, undefined),
-    Stun = case application:get_env(sky, stun_urls, undefined) of
+%% Calls use only your own STUN/TURN server (coturn, see turnserver.conf.example and scripts/turn_setup.sh). Nothing goes to a third party.
+%% The addresses come from, in this order: turn_urls (sys.config), else public_host (sys.config) or the environment variable
+%% SKY_DOMAIN (the same variable the Caddyfile uses) -> turn:HOST:3478 and turns:HOST:5349.
+%% STUN addresses are derived from them (turn:/turns: -> stun:) unless stun_urls is set. TURN needs turn_secret too (without it only STUN is handed out).
+%% With nothing configured the list is empty: calls then work inside one network only. There is no public fallback server.
+turn_urls() ->
+    case sky_settings:get(turn_urls, undefined) of
         L when is_list(L), L =/= [] -> L;
-        _ when is_list(Turn), Turn =/= [] -> lists:usort([stun_from(U) || U <- Turn]);
-        _ -> [<<"stun:stun.l.google.com:19302">>]
+        _ ->
+            case public_host() of
+                undefined -> [];
+                H -> [<<"turn:", H/binary, ":3478">>, <<"turns:", H/binary, ":5349?transport=tcp">>]
+            end
+    end.
+
+public_host() ->
+    case application:get_env(sky, public_host, undefined) of
+        H when is_binary(H), H =/= <<>> -> H;
+        H when is_list(H), H =/= [] -> list_to_binary(H);
+        _ ->
+            case os:getenv("SKY_DOMAIN") of
+                false -> undefined;
+                "" -> undefined;
+                D -> list_to_binary(D)
+            end
+    end.
+
+ice_servers(Phone) ->
+    Turn = turn_urls(),
+    Stun = case sky_settings:get(stun_urls, undefined) of
+        L when is_list(L), L =/= [] -> L;
+        _ when Turn =/= [] -> lists:usort([stun_from(U) || U <- Turn]);
+        _ -> []
     end,
-    Base = [#{<<"urls">> => Stun}],
-    case {Turn, application:get_env(sky, turn_secret, undefined)} of
-        {Urls, Secret} when is_list(Urls), (is_binary(Secret) orelse is_list(Secret)) ->
-            User = <<(integer_to_binary(os:system_time(second) + 86400))/binary, ":", Phone/binary>>,
+    Base = case Stun of [] -> []; _ -> [#{<<"urls">> => Stun}] end,
+    case {Turn, sky_settings:get(turn_secret, undefined)} of
+        {Urls, Secret} when Urls =/= [], (is_binary(Secret) orelse is_list(Secret)) ->
+            User = <<(integer_to_binary(os:system_time(second) + sky_settings:get(turn_ttl, 86400)))/binary, ":", Phone/binary>>,
             Cred = base64:encode(crypto:mac(hmac, sha, Secret, User)),
             Base ++ [#{<<"urls">> => Urls, <<"username">> => User, <<"credential">> => Cred}];
         _ -> Base
@@ -1057,6 +1297,7 @@ push_frame(Phone, Frame) ->
 frame(Map) -> {map, Map}.
 
 reply_err(Code, S) ->
+    sky_stats:inc(errors),
     {[frame(#{<<"type">> => <<"error">>, <<"code">> => Code})], S}.
 
 valid_phone(<<"+", Digits/binary>>) ->
