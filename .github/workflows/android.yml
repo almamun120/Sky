@@ -31,10 +31,15 @@ jobs:
       - name: Install Gradle 8.9 (retries when the download server answers 504)
         working-directory: ${{ runner.temp }}
         run: |
-          for u in https://services.gradle.org/distributions/gradle-8.9-bin.zip https://downloads.gradle.org/distributions/gradle-8.9-bin.zip; do
-            for i in 1 2 3 4 5; do
-              curl -fsSL --retry 3 --retry-all-errors -o gradle.zip "$u" && unzip -q gradle.zip && break 2
-              echo "download failed ($u, try $i), waiting"; sleep $((i*10))
+          for u in https://github.com/gradle/gradle-distributions/releases/download/v8.9.0/gradle-8.9-bin.zip \
+                   https://services.gradle.org/distributions/gradle-8.9-bin.zip \
+                   https://mirrors.cloud.tencent.com/gradle/gradle-8.9-bin.zip \
+                   https://repo.huaweicloud.com/gradle/gradle-8.9-bin.zip \
+                   https://downloads.gradle.org/distributions/gradle-8.9-bin.zip; do
+            for i in 1 2; do
+              rm -f gradle.zip
+              curl -fsSL --max-time 240 -o gradle.zip "$u" && unzip -tq gradle.zip >/dev/null && unzip -q gradle.zip && break 2
+              echo "download failed ($u, try $i)"; sleep 5
             done
           done
           test -x gradle-8.9/bin/gradle
@@ -66,10 +71,15 @@ jobs:
       - name: Install Gradle 8.9 (retries when the download server answers 504)
         working-directory: ${{ runner.temp }}
         run: |
-          for u in https://services.gradle.org/distributions/gradle-8.9-bin.zip https://downloads.gradle.org/distributions/gradle-8.9-bin.zip; do
-            for i in 1 2 3 4 5; do
-              curl -fsSL --retry 3 --retry-all-errors -o gradle.zip "$u" && unzip -q gradle.zip && break 2
-              echo "download failed ($u, try $i), waiting"; sleep $((i*10))
+          for u in https://github.com/gradle/gradle-distributions/releases/download/v8.9.0/gradle-8.9-bin.zip \
+                   https://services.gradle.org/distributions/gradle-8.9-bin.zip \
+                   https://mirrors.cloud.tencent.com/gradle/gradle-8.9-bin.zip \
+                   https://repo.huaweicloud.com/gradle/gradle-8.9-bin.zip \
+                   https://downloads.gradle.org/distributions/gradle-8.9-bin.zip; do
+            for i in 1 2; do
+              rm -f gradle.zip
+              curl -fsSL --max-time 240 -o gradle.zip "$u" && unzip -tq gradle.zip >/dev/null && unzip -q gradle.zip && break 2
+              echo "download failed ($u, try $i)"; sleep 5
             done
           done
           test -x gradle-8.9/bin/gradle
