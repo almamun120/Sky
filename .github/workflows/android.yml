@@ -28,8 +28,18 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - name: Accept Android SDK licenses (the SDK is already on the runner)
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Install Gradle 8.9 (retries when the download server answers 504)
+        working-directory: ${{ runner.temp }}
+        run: |
+          for u in https://services.gradle.org/distributions/gradle-8.9-bin.zip https://downloads.gradle.org/distributions/gradle-8.9-bin.zip; do
+            for i in 1 2 3 4 5; do
+              curl -fsSL --retry 3 --retry-all-errors -o gradle.zip "$u" && unzip -q gradle.zip && break 2
+              echo "download failed ($u, try $i), waiting"; sleep $((i*10))
+            done
+          done
+          test -x gradle-8.9/bin/gradle
+          echo "$PWD/gradle-8.9/bin" >> "$GITHUB_PATH"
       - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: '8.9' }
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
@@ -53,8 +63,18 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - name: Accept Android SDK licenses (the SDK is already on the runner)
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Install Gradle 8.9 (retries when the download server answers 504)
+        working-directory: ${{ runner.temp }}
+        run: |
+          for u in https://services.gradle.org/distributions/gradle-8.9-bin.zip https://downloads.gradle.org/distributions/gradle-8.9-bin.zip; do
+            for i in 1 2 3 4 5; do
+              curl -fsSL --retry 3 --retry-all-errors -o gradle.zip "$u" && unzip -q gradle.zip && break 2
+              echo "download failed ($u, try $i), waiting"; sleep $((i*10))
+            done
+          done
+          test -x gradle-8.9/bin/gradle
+          echo "$PWD/gradle-8.9/bin" >> "$GITHUB_PATH"
       - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: '8.9' }
       - name: Decode signing key
         env:
           SKY_KEYSTORE_BASE64: ${{ secrets.SKY_KEYSTORE_BASE64 }}
